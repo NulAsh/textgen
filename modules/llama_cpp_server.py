@@ -556,6 +556,14 @@ class LlamaServer:
             cmd = _patch_cmd_for_ik(cmd)
 
         env = os.environ.copy()
+        from modules.vault_runtime import ACTIVE
+        if ACTIVE:
+            import secrets
+            # Authenticate the private model service without exposing its key
+            # on the process command line or persisting it in settings.
+            env['LLAMA_API_KEY'] = secrets.token_urlsafe(32)
+            self.session.headers['Authorization'] = 'Bearer ' + env['LLAMA_API_KEY']
+            cmd += ['--host', '127.0.0.1']
         if os.name == 'posix':
             current_path = env.get('LD_LIBRARY_PATH', '')
             if current_path:

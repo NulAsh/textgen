@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>TextGen · Encrypted vault</title>
+  <style>
+    :root { color-scheme: dark; font: 15px system-ui,sans-serif; background: #15171c; color: #eee; }
+    * { box-sizing: border-box; } body { margin: 0; } [hidden] { display: none !important; }
+    .card { max-width: 470px; margin: 10vh auto; padding: 32px; background: #20232a; border: 1px solid #3b414d; border-radius: 16px; }
+    h1 { margin-top: 0; font-size: 26px; } p { color: #bbc1ce; line-height: 1.5; }
+    label { display: block; margin: 18px 0 7px; } input[type=password] { display: block; width: 100%; padding: 12px; border: 1px solid #697283; border-radius: 7px; background: #17191e; color: white; }
+    button { cursor: pointer; padding: 10px 16px; background: #3e64cf; color: white; border: 1px solid #829ee9; border-radius: 7px; font: inherit; }
+    button:disabled { opacity: .6; cursor: wait; } button.secondary { background: #292e39; border-color: #687285; }
+    form > button { margin-top: 22px; width: 100%; } .error { color: #ffb4af; white-space: pre-wrap; }
+    #toolbar { min-height: 58px; display: flex; align-items: center; gap: 12px; padding: 9px 16px; border-bottom: 1px solid #414653; flex-wrap: wrap; }
+    #toolbar strong { margin-right: auto; } #state { font-size: 13px; color: #c5d1e8; }
+    iframe { display: block; width: 100%; height: calc(100vh - 62px); border: 0; background: #15171c; }
+    #notice { padding: 20px; text-align: center; } #diagnostics { color: #bfd0ff; } dialog { max-width: 470px; border: 1px solid #697283; border-radius: 14px; padding: 28px; }
+  </style>
+</head>
+<body>
+  <main id="locked" class="card">
+    <h1 id="heading">Unlock TextGen</h1>
+    <p id="intro">Enter your vault password to open your chats, prompts, and saved content.</p>
+    <form id="unlock-form">
+      <label for="password">Vault password</label><input id="password" name="password" type="password" autocomplete="off" required maxlength="4096" autofocus>
+      <div id="create-fields" hidden>
+        <label for="confirmation">Confirm password</label><input id="confirmation" name="confirmation" type="password" autocomplete="off" maxlength="4096">
+        <p>Use a long, unique passphrase. There is no password reset or recovery key.</p>
+        <label id="import-option" hidden><input id="import-existing" type="checkbox"> Import the existing data selected at startup. I understand that the original files remain unencrypted.</label>
+      </div>
+      <button id="unlock-button" type="submit">Unlock</button>
+      <p id="unlock-error" class="error" role="alert"></p>
+    </form>
+  </main>
+  <main id="unlocked" hidden>
+    <nav id="toolbar" aria-label="Vault controls">
+      <strong>TextGen · Encrypted vault</strong><span id="state" role="status">Starting TextGen…</span>
+      <button id="backup" class="secondary">Encrypted backup</button>
+      <button id="change" class="secondary">Change password</button>
+      <button id="lock">Save and lock</button>
+    </nav>
+    <div id="notice"><p id="notice-text">Starting TextGen…</p><a id="diagnostics" href="/vault/diagnostics" target="_blank" rel="noopener">View diagnostics</a></div>
+    <iframe id="textgen" title="TextGen" hidden allow="clipboard-write"></iframe>
+  </main>
+  <dialog id="password-dialog">
+    <form id="password-form">
+      <h2>Change vault password</h2>
+      <label for="old-password">Current password</label><input id="old-password" type="password" autocomplete="off" required>
+      <label for="new-password">New password</label><input id="new-password" type="password" autocomplete="off" required minlength="12">
+      <label for="new-confirmation">Confirm new password</label><input id="new-confirmation" type="password" autocomplete="off" required minlength="12">
+      <p>Existing backups still use their original password.</p>
+      <button type="submit">Change password</button><button id="cancel-password" type="button" class="secondary">Cancel</button>
+      <p id="password-error" class="error" role="alert"></p>
+    </form>
+  </dialog>
+  <script nonce="__NONCE__">
+    const config = __CONFIG__;
+    const $ = id => document.getElementById(id);
+    let timer;
+    async function post(path, data = {}) {
+      const response = await fetch(path, {method:'POST', headers:{'Content-Type':'application/json','X-Vault-CSRF':config.csrf}, body:JSON.stringify(data), cache:'no-store'});
+      if (!response.ok) { let detail; try { detail = (await response.json()).error; } catch {} throw new Error(detail || 'The operation could not be completed.'); }
+      return response;
+    }
+    function clearFrame() { $('textgen').removeAttribute('src'); $('textgen').hidden = true; }
+    async function poll() {
+      try {
+        const response = await fetch('/vault/status', {cache:'no-store'});
+        if (response.status === 401) { clearFrame(); location.replace('/'); return; }
+        const state = await response.json();
+        $('notice').hidden = state.ready && !state.error;
+        $('notice-text').textContent = state.error || 'Starting TextGen…';
+        $('state').textContent = state.error ? 'Attention needed' : state.ready ? 'Vault unlocked' : 'Starting TextGen…';
+        if (state.error) clearFrame();
+        else if (state.ready && !$('textgen').hasAttribute('src')) { $('textgen').src = '/ui/'; $('textgen').hidden = false; }
+      } catch { $('state').textContent = 'Connection lost'; clearFrame(); }
+    }
+    function showApp() { $('unlock-form').reset(); $('locked').hidden = true; $('unlocked').hidden = false; poll(); clearInterval(timer); timer = setInterval(poll, 2000); }
+    if (config.creating) { $('heading').textContent = 'Create an encrypted vault'; $('intro').textContent = 'Protect your chats, system prompts, uploads, and generated content with one password.'; $('create-fields').hidden = false; $('confirmation').required = true; $('password').minLength = 12; $('unlock-button').textContent = 'Create vault'; $('import-option').hidden = !config.canImport; }
+    if (config.authenticated) showApp();
+    $('unlock-form').addEventListener('submit', async event => {
+      event.preventDefault(); $('unlock-button').disabled = true; $('unlock-error').textContent = '';
+      const data = {password:$('password').value, confirmation:$('confirmation').value, importExisting:$('import-existing').checked};
+      $('password').value = $('confirmation').value = '';
+      try { await post('/vault/unlock', data); showApp(); } catch (e) { $('unlock-error').textContent = e.message; } finally { data.password = data.confirmation = ''; $('unlock-button').disabled = false; }
+    });
+    $('lock').addEventListener('click', async () => {
+      $('lock').disabled = true; clearFrame(); clearInterval(timer);
+      try { await post('/vault/lock'); location.replace('/'); } catch (e) { $('notice').hidden = false; $('notice-text').textContent = e.message + ' Re-enter your password to retry.'; setTimeout(() => location.replace('/'), 5000); } finally { $('lock').disabled = false; }
+    });
+    $('backup').addEventListener('click', async () => {
+      $('backup').disabled = true;
+      try { const response = await post('/vault/backup'); const url = URL.createObjectURL(await response.blob()); const link = document.createElement('a'); link.href = url; link.download = 'textgen-vault-backup.sqlite3'; link.click(); setTimeout(() => URL.revokeObjectURL(url), 10000); } catch (e) { $('notice').hidden = false; $('notice-text').textContent = e.message; } finally { $('backup').disabled = false; }
+    });
+    $('change').addEventListener('click', () => { $('password-form').reset(); $('password-error').textContent = ''; $('password-dialog').showModal(); });
+    $('cancel-password').addEventListener('click', () => { $('password-form').reset(); $('password-dialog').close(); });
+    $('password-form').addEventListener('submit', async event => {
+      event.preventDefault();
+      const data = {oldPassword:$('old-password').value, newPassword:$('new-password').value, confirmation:$('new-confirmation').value};
+      $('password-form').reset();
+      try { await post('/vault/password', data); $('password-dialog').close(); } catch (e) { $('password-error').textContent = e.message; } finally { data.oldPassword = data.newPassword = data.confirmation = ''; }
+    });
+    addEventListener('pageshow', event => { if (event.persisted) { clearFrame(); location.reload(); } });
+  </script>
+</body>
+</html>

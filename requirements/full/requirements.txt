@@ -1,3 +1,7 @@
+# Encrypted vault
+cryptography>=44,<51
+aiohttp>=3.12,<4
+
 accelerate==1.13.*
 audioop-lts<1.0; python_version >= "3.13"
 bitsandbytes==0.49.*

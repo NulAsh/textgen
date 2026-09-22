@@ -1,6 +1,16 @@
 import os
 import signal
 import sys
+
+# The browser vault starts before importing shared state or reading user data.
+# The confined worker re-enters this file after Landlock has been enforced.
+if __name__ == '__main__':
+    from modules import vault_runtime
+    if not vault_runtime.ACTIVE:
+        from modules.vault_gateway import main as vault_main
+        vault_main()
+        raise SystemExit(0)
+
 import time
 import warnings
 from functools import partial
@@ -10,6 +20,8 @@ from threading import Lock, Thread
 import yaml
 
 from modules import shared, utils
+from modules import vault_runtime
+vault_runtime.enforce_options(shared)
 from modules.image_models import load_image_model
 from modules.logging_colors import logger
 from modules.prompts import load_prompt
@@ -36,6 +48,20 @@ def signal_handler(sig, frame):
     signal.signal(signal.SIGINT, signal.SIG_DFL)
     signal.signal(signal.SIGTERM, signal.SIG_DFL)
 
+    if vault_runtime.ACTIVE:
+        from modules import models
+        from modules.text_generation import stop_everything_event
+        stop_everything_event()
+        deadline = time.monotonic() + 5
+        while models.active_generation_count and time.monotonic() < deadline:
+            time.sleep(0.05)
+        # Flush the pending settings debounce before the supervisor snapshots
+        # the stopped worker's data and destroys the RAM workspace.
+        from modules import ui, ui_notebook
+        vault_runtime.flush_pending_save(ui._auto_save_timer, ui._perform_debounced_save)
+        vault_runtime.flush_pending_save(ui_notebook._notebook_auto_save_timer, ui_notebook._perform_notebook_debounced_save)
+        vault_runtime.close()
+
     # Explicitly stop LlamaServer to avoid __del__ cleanup issues during shutdown
     if shared.model and shared.model.__class__.__name__ == 'LlamaServer':
         try:
@@ -51,6 +77,8 @@ signal.signal(signal.SIGTERM, signal_handler)
 
 
 def create_interface():
+
+    vault_runtime.enforce_options(shared)
 
     import shutil
 
@@ -145,6 +173,7 @@ def create_interface():
 
     # Head HTML for font preloads, KaTeX, highlight.js, morphdom, and global JS
     head_html = '\n'.join([
+        '<script>document.documentElement.dataset.textgenVault = "true";</script>' if vault_runtime.ACTIVE else '',
         '<link rel="preload" href="file/css/Inter/Inter-VariableFont_opsz,wght.ttf" as="font" type="font/ttf" crossorigin>',
         '<link rel="preload" href="file/css/Inter/Inter-Italic-VariableFont_opsz,wght.ttf" as="font" type="font/ttf" crossorigin>',
         '<link rel="preload" href="file/css/NotoSans/NotoSans-Medium.woff2" as="font" type="font/woff2" crossorigin>',
@@ -188,7 +217,8 @@ def create_interface():
         ui_model_menu.create_ui()  # Model tab
         if not shared.args.portable:
             ui_image_generation.create_ui()  # Image generation tab
-            training.create_ui()  # Training tab
+            if not vault_runtime.ACTIVE:
+                training.create_ui()  # Training tab
         ui_session.create_ui()  # Session tab
 
         # Generation events
@@ -229,6 +259,9 @@ def create_interface():
 
     # Launch the interface
     shared.gradio['interface'].queue()
+    if vault_runtime.ACTIVE:
+        vault_runtime.launch(shared.gradio['interface'], allowed_paths)
+        return
     shared.gradio['interface'].launch(
         max_threads=64,
         prevent_thread_lock=True,
@@ -280,6 +313,8 @@ if __name__ == "__main__":
 
     # Apply CLI overrides for image model settings (CLI flags take precedence over saved settings)
     shared.apply_image_model_cli_overrides()
+
+    vault_runtime.enforce_options(shared)
 
     # Activate the extensions listed on settings.yaml
     extensions_module.available_extensions = utils.get_available_extensions()

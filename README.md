@@ -1,4 +1,23 @@
-# TextGen
+# TextGen Encrypted Vault
+
+This fork adds **single-user encryption at rest with browser-based unlocking**.
+`python server.py` starts the vault gateway; TextGen and its model are started
+only after unlocking. Chats, prompts, settings, uploads, images and diagnostic
+logs are persisted in an authenticated encrypted database.
+
+**This implementation requires Linux (x86_64/aarch64), Python 3.11+, tmpfs and
+Landlock ABI 3+.** It is a source fork; upstream desktop downloads do not contain
+these changes. Separate API serving, extensions, custom tools/MCP, training and
+in-app model downloads are unavailable in this version.
+
+Read **[Encrypted Vault setup and security boundaries](docs/Encrypted-Vault.md)**
+before using it. Start with synthetic data while validating your model backend.
+The upstream README below describes upstream features; the vault guide takes
+precedence for this fork.
+
+---
+
+# Upstream TextGen
 
 **A desktop app for local LLMs. Open source, no telemetry.** Text, vision, tool-calling, web search. UI + API.
 

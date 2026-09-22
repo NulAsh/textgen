@@ -1,0 +1,28 @@
+name: Encrypted vault tests
+
+on:
+  push:
+    branches: [main, encrypted-vault]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  vault:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Install portable interface and test dependencies
+        run: python -m pip install -r requirements/portable/requirements_nowheels.txt pytest pytest-asyncio ruff
+      - name: Require native write isolation
+        run: python -c 'from modules.vault_linux import landlock_abi; print("Landlock ABI", landlock_abi())'
+      - name: Test encrypted storage, gateway and native worker
+        run: python -m pytest -q -rs tests/vault
+      - name: Lint vault code
+        run: ruff check modules/vault_*.py tests/vault --output-format concise

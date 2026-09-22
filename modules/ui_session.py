@@ -6,6 +6,7 @@ from pathlib import Path
 import gradio as gr
 
 from modules import shared, ui, utils
+from modules.vault_runtime import ACTIVE as VAULT_ACTIVE
 from modules.utils import gradio
 
 PORTABLE_FOLDER_RE = re.compile(r'^textgen(?:-ik)?-(\d+\.\d+(?:\.\d+)?)$')
@@ -78,7 +79,7 @@ def create_ui():
                     shared.gradio['check_updates'] = gr.Button('Check for updates 🔄', elem_classes=['refresh-button', 'settings-button'])
                     shared.gradio['update_status'] = gr.HTML(value='', elem_id='update-status')
 
-            with gr.Column():
+            with gr.Column(visible=not VAULT_ACTIVE):
                 gr.Markdown("## Extensions & flags")
                 with gr.Row():
                     shared.gradio['save_settings'] = gr.Button(f'Save extensions settings to {shared.user_data_dir}/settings.yaml', elem_classes=['refresh-button', 'settings-button'], interactive=not mu)
@@ -172,6 +173,8 @@ def apply_model_dir(value):
 
 
 def set_interface_arguments(extensions, bool_active):
+    if VAULT_ACTIVE:
+        raise gr.Error('Restart TextGen from the vault controls to change launch options.')
     shared.args.extensions = extensions
 
     bool_list = get_boolean_arguments()

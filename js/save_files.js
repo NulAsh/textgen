@@ -7,6 +7,10 @@ function getCurrentTimestamp() {
 }
 
 function saveFile(contents, filename) {
+  if (document.documentElement.dataset.textgenVault === "true") {
+    alert("Use Encrypted backup in the vault toolbar to download your saved content.");
+    return;
+  }
   const element = document.createElement("a");
   element.setAttribute("href", "data:text/plain;charset=utf-8," + encodeURIComponent(contents));
   element.setAttribute("download", filename);

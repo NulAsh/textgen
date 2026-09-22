@@ -455,12 +455,18 @@ def load_user_config():
     Loads custom model-specific settings
     '''
     user_config = {}
-    if Path(f'{args.model_dir}/config-user.yaml').exists():
-        file_content = open(f'{args.model_dir}/config-user.yaml', 'r').read().strip()
+    path = user_config_path()
+    if path.exists():
+        file_content = path.read_text(encoding='utf-8').strip()
         if file_content:
             user_config = yaml.safe_load(file_content)
 
     return user_config
+
+
+def user_config_path():
+    from modules.vault_runtime import ACTIVE
+    return user_data_dir / 'model-settings.yaml' if ACTIVE else Path(args.model_dir) / 'config-user.yaml'
 
 
 args.loader = fix_loader_name(args.loader)

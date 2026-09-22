@@ -3,6 +3,7 @@ import importlib.util
 import json
 
 from modules import shared
+from modules.vault_runtime import ACTIVE as VAULT_ACTIVE
 from modules.logging_colors import logger
 from modules.utils import natural_keys, sanitize_filename
 
@@ -11,6 +12,8 @@ _MCP_JSON_PATH = shared.user_data_dir / 'mcp.json'
 
 def get_available_tools():
     """Return sorted list of tool script names from user_data/tools/*.py."""
+    if VAULT_ACTIVE:
+        return []
     tools_dir = shared.user_data_dir / 'tools'
     tools_dir.mkdir(parents=True, exist_ok=True)
     return sorted((p.stem for p in tools_dir.glob('*.py')), key=natural_keys)
@@ -23,6 +26,8 @@ def load_tools(selected_names):
       - tool_defs: list of OpenAI-format tool dicts
       - executors: dict mapping function_name -> execute callable
     """
+    if VAULT_ACTIVE:
+        return [], {}
     tool_defs = []
     executors = {}
     for name in selected_names:
@@ -79,6 +84,8 @@ def _parse_mcp_servers(servers_str):
 
 def has_mcp_config():
     """Check if user_data/mcp.json exists."""
+    if VAULT_ACTIVE:
+        return False
     return _MCP_JSON_PATH.exists()
 
 
@@ -96,7 +103,7 @@ def _load_mcp_json():
         }
     }
     """
-    if not _MCP_JSON_PATH.exists():
+    if VAULT_ACTIVE or not _MCP_JSON_PATH.exists():
         return []
 
     try:
@@ -213,6 +220,8 @@ def load_mcp_tools(servers_str):
     Returns (tool_defs, executors) in the same format as load_tools.
     Tool discovery is cached per server so each server is only queried once.
     """
+    if VAULT_ACTIVE:
+        return [], {}
     servers = _parse_mcp_servers(servers_str) if servers_str else []
     servers += _load_mcp_json()
     if not servers:

@@ -27,6 +27,9 @@ def apply_settings(extension, name):
 def load_extensions():
     global state, setup_called
     state = {}
+    from modules.vault_runtime import ACTIVE
+    if ACTIVE:
+        return
 
     for i, name in enumerate(shared.args.extensions):
         if name not in available_extensions:

@@ -291,7 +291,7 @@ def save_model_settings(model, state):
     shared.user_config = user_config
 
     output = yaml.dump(user_config, sort_keys=False)
-    p = Path(f'{shared.args.model_dir}/config-user.yaml')
+    p = shared.user_config_path()
     with open(p, 'w') as f:
         f.write(output)
 
@@ -319,7 +319,7 @@ def save_instruction_template(model, template):
     shared.user_config = user_config
 
     output = yaml.dump(user_config, sort_keys=False)
-    p = Path(f'{shared.args.model_dir}/config-user.yaml')
+    p = shared.user_config_path()
     with open(p, 'w') as f:
         f.write(output)
 

@@ -268,6 +268,10 @@ def load_lora_wrapper(selected_loras):
 
 
 def download_model_wrapper(repo_id, specific_file, progress=gr.Progress(), return_links=False, check=False):
+    from modules.vault_runtime import ACTIVE
+    if ACTIVE:
+        yield 'Download model weights outside TextGen, then refresh the model list. The vault keeps model directories read-only.'
+        return
     downloader_module = importlib.import_module("download-model")
     downloader = downloader_module.ModelDownloader()
     update_queue = queue.Queue()

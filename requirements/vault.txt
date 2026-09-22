@@ -1,0 +1,2 @@
+cryptography>=44,<51
+aiohttp>=3.12,<4
