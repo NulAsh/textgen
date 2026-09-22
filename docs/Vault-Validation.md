@@ -3,6 +3,24 @@
 Validated against upstream `c93f8871239550de2ccfe1e95d469aa82616f07e`.
 All fixtures contain synthetic data. No user chats or passwords were used.
 
+## Linux CI result
+
+[Run 35703631813](https://github.com/NulAsh/textgen/actions/runs/35703631813)
+passed on 2026-09-22 for implementation commit
+`a6dae1d38b2173636350307a3db752b67b94b142`:
+
+```text
+Ubuntu 24.04.5, CPython 3.11.16, Landlock ABI 7
+41 passed in 12.95s; no skipped tests
+Ruff: All checks passed!
+```
+
+This includes the production confined worker, private Unix socket, real Gradio
+configuration/upload routes, encrypted save, shutdown, RAM cleanup and restored
+upload contents. The native subprocess test also verifies that writes outside
+the allowed RAM directory are denied in both parent and child processes.
+No inference model was loaded during this run.
+
 ## Local results
 
 The suite was run with Python 3.12.14, cryptography 50.0.1, the upstream portable
