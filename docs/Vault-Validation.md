@@ -26,6 +26,12 @@ Local runs on Python 3.12.14 and 3.14.10 each completed with **42 passed and
 2 skipped** (the native Landlock tests). The queue regression failed with HTTP
 500 before the fix and passed afterward on both versions. Ruff also passed.
 
+[CI run 42982187397](https://github.com/NulAsh/textgen/actions/runs/42982187397)
+passed **all 44 tests with no skips on both Python 3.11 and 3.14**, including
+the production confined worker and its real queued page-load event. Both jobs
+also passed Ruff. This validates implementation commit
+`0a9c4aa1be06dbbc60177d939f40f386ea3ab48c`.
+
 ## Linux CI result
 
 [Run 35703631813](https://github.com/NulAsh/textgen/actions/runs/35703631813)
