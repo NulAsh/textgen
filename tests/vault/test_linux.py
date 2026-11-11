@@ -13,9 +13,11 @@ from modules.vault_linux import landlock_abi, verify_tmpfs
 from modules.vault_store import VaultError
 
 
-def test_disk_directory_is_refused(tmp_path):
+def test_non_tmpfs_directory_is_refused():
+    # /tmp can legitimately be tmpfs, including on desktop Linux. procfs
+    # provides a real non-tmpfs directory without relying on that assumption.
     with pytest.raises(VaultError, match='tmpfs'):
-        verify_tmpfs(tmp_path)
+        verify_tmpfs('/proc')
 
 
 def test_ram_directory_symlink_is_refused(tmp_path):
@@ -103,7 +105,28 @@ async def test_native_gateway_and_worker(tmp_path, unused_tcp_port):
         assert supervisor.ready and not supervisor.error, diagnostics
         response = await client.get('/ui/config')
         assert response.status == 200, await response.text()
-        assert len((await response.json())['components']) > 100
+        config = await response.json()
+        assert len(config['components']) > 100
+        # Submit the actual no-input page-load event the browser queues. A
+        # successful config/upload alone does not prove the queue is usable.
+        load = next(event for event in config['dependencies']
+                    if event['backend_fn'] and not event['inputs']
+                    and any(target[1] == 'load' for target in event['targets']))
+        response = await client.post('/ui/queue/join?', json={'data': [], 'fn_index': load['id'], 'session_hash': 'native-queue-test'})
+        assert response.status == 200, await response.text()
+        event_id = (await response.json())['event_id']
+        async def wait_for_completion():
+            async with client.get('/ui/queue/data?session_hash=native-queue-test') as events:
+                assert events.status == 200
+                async for line in events.content:
+                    if line.startswith(b'data: '):
+                        message = json.loads(line[6:])
+                        if message['msg'] == 'process_completed':
+                            assert message['event_id'] == event_id
+                            assert message['success'], message
+                            return
+                raise AssertionError('Queue stream ended before completing the event')
+        await asyncio.wait_for(wait_for_completion(), timeout=15)
         upload = aiohttp.FormData()
         upload.add_field('files', secret.encode(), filename='synthetic.txt', content_type='text/plain')
         response = await client.post('/ui/upload', data=upload)

@@ -36,11 +36,12 @@
   <main id="unlocked" hidden>
     <nav id="toolbar" aria-label="Vault controls">
       <strong>TextGen · Encrypted vault</strong><span id="state" role="status">Starting TextGen…</span>
+      <a id="diagnostics" href="/vault/diagnostics" target="_blank" rel="noopener">Diagnostics</a>
       <button id="backup" class="secondary">Encrypted backup</button>
       <button id="change" class="secondary">Change password</button>
       <button id="lock">Save and lock</button>
     </nav>
-    <div id="notice"><p id="notice-text">Starting TextGen…</p><a id="diagnostics" href="/vault/diagnostics" target="_blank" rel="noopener">View diagnostics</a></div>
+    <div id="notice"><p id="notice-text">Starting TextGen…</p></div>
     <iframe id="textgen" title="TextGen" hidden allow="clipboard-write"></iframe>
   </main>
   <dialog id="password-dialog">

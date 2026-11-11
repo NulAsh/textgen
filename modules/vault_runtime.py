@@ -1,9 +1,11 @@
 """Integration between the RAM-confined TextGen worker and the web gateway."""
 
+import asyncio
 import os
 import runpy
 import sys
 import threading
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 ACTIVE = False
@@ -31,8 +33,23 @@ def build_app(blocks, allowed_paths):
     import gradio as gr
     from fastapi import FastAPI
 
+    @asynccontextmanager
+    async def queue_lifespan(gradio_app):
+        # Gradio 4's safe_get_lock/safe_get_stop_event return None when the
+        # UI is built without a current event loop (the default on Python
+        # 3.14). Initialize on the serving loop, before Gradio starts its
+        # queue. Config/uploads can work even when these locks are missing.
+        blocks._queue.pending_message_lock = asyncio.Lock()
+        blocks._queue.delete_lock = asyncio.Lock()
+        gradio_app.lock = asyncio.Lock()
+        gradio_app.stop_event = asyncio.Event()
+        blocks.app = gradio_app
+        blocks._queue.set_server_app(gradio_app)
+        yield
+
     app = FastAPI()
     return gr.mount_gradio_app(app, blocks, path="/", root_path="/ui", allowed_paths=allowed_paths,
+                              app_kwargs={"lifespan": queue_lifespan},
                               show_error=False, favicon_path="css/icon.png", max_file_size='256mb')
 
 

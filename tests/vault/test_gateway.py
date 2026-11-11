@@ -197,6 +197,49 @@ async def test_background_save_failure_stops_worker_and_retains_data(app, monkey
     monkeypatch.setattr(supervisor.vault, 'sync', original)
 
 
+@pytest.mark.asyncio
+async def test_proxy_error_is_available_only_in_encrypted_diagnostics(app, monkeypatch, capsys):
+    supervisor, client = app
+    await unlock(client)
+    supervisor.ready = True
+    detail = 'SYNTHETIC-PRIVATE-PROXY-EXCEPTION'
+    def fail(**kwargs):
+        raise RuntimeError(detail)
+    monkeypatch.setattr(gateway.aiohttp, 'UnixConnector', fail)
+    response = await client.post('/ui/queue/join?', json={'data': ['synthetic input']})
+    assert response.status == 500
+    assert detail not in await response.text()
+    console = capsys.readouterr()
+    assert detail not in console.out + console.err
+    assert 'Diagnostics' in console.err
+    response = await client.get('/vault/diagnostics')
+    assert response.status == 200
+    assert response.headers['Cache-Control'].startswith('no-store')
+    assert detail in await response.text()
+    response = await client.post('/vault/backup', json={})
+    assert detail.encode() not in await response.read()
+    response = await client.post('/vault/lock', json={})
+    assert response.status == 200
+    assert (await client.get('/vault/diagnostics')).status == 401
+
+
+@pytest.mark.asyncio
+async def test_password_request_errors_are_not_written_to_diagnostics(app, monkeypatch, capsys):
+    supervisor, client = app
+    await unlock(client)
+    detail = 'SYNTHETIC-PASSWORD-EXCEPTION'
+    def fail(*args):
+        raise RuntimeError(detail)
+    monkeypatch.setattr(supervisor.vault, 'change_password', fail)
+    response = await client.post('/vault/password', json={'oldPassword': PASSWORD, 'newPassword': detail, 'confirmation': detail})
+    assert response.status == 500
+    assert detail not in await response.text()
+    response = await client.get('/vault/diagnostics')
+    assert detail not in await response.text()
+    console = capsys.readouterr()
+    assert detail not in console.out + console.err
+
+
 def test_production_refuses_missing_landlock(tmp_path, monkeypatch):
     options = SimpleNamespace(vault=str(tmp_path / 'vault.sqlite3'), vault_ram_dir='/dev/shm')
     supervisor = gateway.Supervisor(options, [])

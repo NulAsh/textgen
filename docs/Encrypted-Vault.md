@@ -38,6 +38,10 @@ Open `http://127.0.0.1:7860`. On first use, choose and confirm a long password
 and chat interface start after unlocking. The password is never a CLI argument
 or an environment variable, and it is not written to the vault.
 
+The requirements now use `numpy==2.3.*` and `pydantic==2.14.3`, including for
+Python 3.14 installations. The browser/queue tests run on Python 3.11 and 3.14;
+native model packages have their own Python/backend compatibility requirements.
+
 Normal model flags, such as `--model`, `--gpu-layers`, `--ctx-size` and
 `--cache-type`, are forwarded to TextGen. The gateway has its own `--help`.
 External `CMD_FLAGS.txt` is not loaded by the launcher; pass flags explicitly.
@@ -108,6 +112,37 @@ the RAM workspace. It does **not** report a successful lock or delete the last
 copy of unsaved data. Correct the storage problem, re-enter the password and
 retry **Save and lock**. Do not reboot if you need to recover unsaved RAM data.
 The diagnostic view is authenticated and marked `no-store`.
+
+### Connection errors and diagnostics
+
+The **Diagnostics** link is always available in the unlocked toolbar. It opens
+`http://127.0.0.1:7860/vault/diagnostics` (use your configured port). Backend
+tracebacks and proxy failures are kept inside the vault because they can contain
+private input or paths. Only a generic proxy-failure notice goes to the terminal.
+
+The November 2026 queue fix addresses a `500 Internal Server Error` from
+`/ui/queue/join` when Gradio was constructed without an event loop. This occurs
+by default on Python 3.14: Gradio 4's helper returned `None` for its queue locks.
+The vault now creates those locks and its stop event on the serving event loop
+before starting the queue. Its tests submit actual queued events and consume
+streamed results, in addition to checking page configuration and uploads.
+
+To update an existing checkout after editing requirements locally:
+
+```bash
+git stash push -m "local requirements before queue fix" -- requirements
+git pull --ff-only
+```
+
+This keeps the old requirement edits in a Git stash. The updated files already
+contain the NumPy/Pydantic pins above. With the existing environment activated,
+install those versions if needed, then restart with your usual vault command:
+
+```bash
+python -m pip install 'numpy==2.3.*' 'pydantic==2.14.3'
+```
+
+Continue using the existing vault database and password.
 
 **Encrypted backup** downloads a consistent, single-file SQLite backup. It
 contains encrypted content only. Use this button instead of copying a live

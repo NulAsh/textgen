@@ -3,6 +3,29 @@
 Validated against upstream `c93f8871239550de2ccfe1e95d469aa82616f07e`.
 All fixtures contain synthetic data. No user chats or passwords were used.
 
+## Queue regression, 2026-11-11
+
+The initial validation did not submit a real Gradio queue job. A later report
+identified HTTP 500 from `/ui/queue/join` despite successful page loading and
+vault unlock. This was reproduced by constructing Gradio without a current
+event loop: its queue locks were `None`. Python 3.14 uses that startup behavior.
+
+The fix initializes Gradio's queue locks, app lock and stop event during ASGI
+startup on the serving event loop. Added tests cover two successive queued
+generator calls through `/queue/join` and `/queue/data`, including streamed and
+completed output. The native worker test also submits TextGen's real page-load
+event through the authenticated gateway and waits for successful completion.
+
+Additional tests verify that proxy exception details are accessible only
+through authenticated diagnostics and encrypted backups, and that password
+request exceptions are excluded from detailed logging. CI now runs Python 3.11
+and 3.14 with NumPy 2.3 and Pydantic 2.14.3. The historical results below apply
+to the first implementation, before these regression tests were added.
+
+Local runs on Python 3.12.14 and 3.14.10 each completed with **42 passed and
+2 skipped** (the native Landlock tests). The queue regression failed with HTTP
+500 before the fix and passed afterward on both versions. Ruff also passed.
+
 ## Linux CI result
 
 [Run 35703631813](https://github.com/NulAsh/textgen/actions/runs/35703631813)

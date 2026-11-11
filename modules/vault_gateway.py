@@ -12,6 +12,7 @@ import shutil
 import signal
 import sys
 import time
+import traceback
 from pathlib import Path
 
 import aiohttp
@@ -186,7 +187,7 @@ class Supervisor:
             os.killpg(process.pid, signal.SIGINT)
         try:
             await asyncio.wait_for(process.wait(), 12)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             with contextlib.suppress(ProcessLookupError):
                 os.killpg(process.pid, signal.SIGKILL)
             await process.wait()
@@ -230,7 +231,7 @@ class Supervisor:
                         connector = aiohttp.UnixConnector(path=str(self.workspace / "backend.sock"))
                         async with aiohttp.ClientSession(connector=connector) as client, client.get("http://localhost/config", timeout=aiohttp.ClientTimeout(total=2)) as response:
                             self.ready = response.status == 200
-                except (SnapshotBusy, aiohttp.ClientError, asyncio.TimeoutError):
+                except (TimeoutError, SnapshotBusy, aiohttp.ClientError):
                     # A changing file or a starting socket is retried next tick.
                     continue
                 except Exception:  # noqa: BLE001 - fail closed without logging plaintext exception details
@@ -240,6 +241,20 @@ class Supervisor:
     def authenticated(self, request):
         token = request.cookies.get(COOKIE, "")
         return self.session is not None and secrets.compare_digest(token, self.session)
+
+    def record_proxy_error(self, error):
+        """Keep exception details only in the unlocked, encrypted working data."""
+        if self.vault is None:
+            return
+        try:
+            path = self.workspace / 'data/private_logs/gateway.log'
+            path.parent.mkdir(mode=0o700, exist_ok=True)
+            with path.open('a', encoding='utf-8') as log:
+                log.write(time.strftime('\n%Y-%m-%d %H:%M:%S UTC\n', time.gmtime()))
+                traceback.print_exception(type(error), error, error.__traceback__, file=log)
+        except OSError:
+            # Disk/RAM failures must not send exception details to the console.
+            pass
 
 
 def create_app(supervisor):
@@ -259,10 +274,15 @@ def create_app(supervisor):
             response = web.Response(status=error.status, text=error.text, headers=error.headers)
         except VaultError as error:
             response = web.json_response({"error": str(error)}, status=400)
-        except Exception:  # noqa: BLE001 - HTTP errors must not expose exception contents
+        except Exception as error:  # noqa: BLE001 - HTTP errors must not expose exception contents
             # Exception strings may include filenames/input. Detailed backend
             # diagnostics stay in the encrypted vault, never in HTTP errors.
-            response = web.json_response({"error": "The operation failed. The vault has not been discarded."}, status=500)
+            if request.path.startswith('/ui/'):
+                supervisor.record_proxy_error(error)
+            # Password/control requests are deliberately excluded from detailed
+            # logging. The console gets no request bodies, URLs or exceptions.
+            print('Vault web request failed. Open Diagnostics in the unlocked vault.', file=sys.stderr)
+            response = web.json_response({"error": "The operation failed. Check Diagnostics in the unlocked vault."}, status=500)
         response.headers["Cache-Control"] = "no-store, max-age=0"
         response.headers["Pragma"] = "no-cache"
         response.headers["X-Content-Type-Options"] = "nosniff"
@@ -329,13 +349,14 @@ def create_app(supervisor):
 
     async def diagnostics(request):
         require_auth(request)
-        path = supervisor.workspace / "data/private_logs/backend.log"
-        if not path.exists():
-            return web.Response(text="No diagnostic output yet.", content_type="text/plain")
-        with path.open("rb") as stream:
-            stream.seek(max(0, path.stat().st_size - 65536))
-            text = stream.read().decode("utf-8", errors="replace")
-        return web.Response(text=text, content_type="text/plain")
+        sections = []
+        for name in ('backend.log', 'gateway.log'):
+            path = supervisor.workspace / 'data/private_logs' / name
+            if path.exists():
+                with path.open('rb') as stream:
+                    stream.seek(max(0, path.stat().st_size - 65536))
+                    sections.append(f'--- {name} ---\n' + stream.read().decode('utf-8', errors='replace'))
+        return web.Response(text='\n\n'.join(sections) or 'No diagnostic output yet.', content_type='text/plain')
 
     async def proxy(request):
         require_auth(request)
