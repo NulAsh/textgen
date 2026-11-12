@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -69,12 +70,16 @@ def test_real_textgen_interface_and_persistence(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_native_gateway_and_worker(tmp_path, unused_tcp_port):
+@pytest.mark.parametrize('isolation', ['landlock', 'colab'])
+async def test_native_gateway_and_worker(tmp_path, unused_tcp_port, isolation):
     """Exercise the production worker, Landlock and Unix socket together."""
-    try:
-        landlock_abi()
-    except VaultError as error:
-        pytest.skip(str(error))
+    if isolation == 'landlock':
+        try:
+            landlock_abi()
+        except VaultError as error:
+            pytest.skip(str(error))
+    elif os.geteuid() != 0:
+        pytest.skip('Colab isolation uses a root supervisor and a dedicated unprivileged worker.')
     pytest.importorskip('gradio')
     import aiohttp
     from aiohttp.test_utils import TestClient, TestServer
@@ -84,29 +89,40 @@ async def test_native_gateway_and_worker(tmp_path, unused_tcp_port):
 
     models = tmp_path / 'models'
     models.mkdir()
+    if isolation == 'colab':
+        # These contain only synthetic fixtures/public model files. Permit
+        # traversal for the separate worker UID without modifying host data.
+        for directory in (models, tmp_path, tmp_path.parent, tmp_path.parent.parent):
+            directory.chmod(0o755)
     options = SimpleNamespace(vault=str(tmp_path / 'native.sqlite3'), vault_ram_dir='/dev/shm',
                               vault_import=None, listen_port=unused_tcp_port, model_dir=str(models),
-                              image_model_dir=str(models), lora_dir=str(models))
+                              image_model_dir=str(models), lora_dir=str(models), vault_isolation=isolation,
+                              vault_colab_origin='https://native-7860-colab.googleusercontent.com' if isolation == 'colab' else None)
     supervisor = Supervisor(options, ['--portable'])
     client = TestClient(TestServer(create_app(supervisor), port=unused_tcp_port),
                         cookie_jar=aiohttp.CookieJar(unsafe=True))
     await client.start_server()
-    client.session.headers.update({'Origin': f'http://127.0.0.1:{unused_tcp_port}', 'X-Vault-CSRF': supervisor.csrf})
+    client.session.headers.update({'Origin': supervisor.colab_origin or f'http://127.0.0.1:{unused_tcp_port}', 'X-Vault-CSRF': supervisor.csrf})
     password = 'native synthetic test password'
     secret = 'SYNTHETIC-NATIVE-ENCRYPTED-UPLOAD-927018'
     try:
         response = await client.post('/vault/unlock', json={'password': password, 'confirmation': password})
         assert response.status == 200, await response.text()
+        if supervisor.colab_origin:
+            client.session.headers['Cookie'] = f'textgen_vault_session={supervisor.session}'
         for _ in range(120):
             if supervisor.ready or supervisor.error:
                 break
             await asyncio.sleep(0.5)
         diagnostics = (supervisor.workspace / 'data/private_logs/backend.log').read_text()
         assert supervisor.ready and not supervisor.error, diagnostics
-        response = await client.get('/ui/config')
+        response = await client.get('/ui/config', headers={'X-Forwarded-Host': 'untrusted.example', 'X-Forwarded-Proto': 'http'})
         assert response.status == 200, await response.text()
         config = await response.json()
         assert len(config['components']) > 100
+        if supervisor.colab_origin:
+            assert config['root'] == supervisor.colab_origin + '/ui'
+            assert 'X-Frame-Options' not in response.headers
         # Submit the actual no-input page-load event the browser queues. A
         # successful config/upload alone does not prove the queue is usable.
         load = next(event for event in config['dependencies']

@@ -48,12 +48,13 @@ def runtime_path(vault_path, base="/dev/shm"):
     return Path(base) / f"textgen-vault-{os.getuid()}-{suffix}"
 
 
-def make_runtime(path):
+def make_runtime(path, allow_worker_group=False):
     path = Path(path)
     verify_tmpfs(path.parent)
     if path.exists() or path.is_symlink():
         info = path.lstat()
-        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+        modes = (0o700, 0o710) if allow_worker_group and os.geteuid() == 0 else (0o700,)
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) not in modes:
             raise VaultError("Unsafe existing RAM workspace; refusing to use or remove it.")
         # The gateway holds the exclusive vault lock before calling this.
         shutil.rmtree(path)

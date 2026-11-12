@@ -45,14 +45,16 @@ def test_invalid_library_manifest_is_refused(tmp_path, aliases):
     assert not (tmp_path / 'ram').exists()
 
 
-@pytest.mark.parametrize('confined', [False, True], ids=['loader', 'landlock'])
+@pytest.mark.parametrize('confined', [False, True, 'colab'], ids=['loader', 'landlock', 'colab'])
 def test_fresh_llama_wheel_loads_and_generates(tmp_path, confined):
     """Use real release binaries and a tiny public model when supplied by CI."""
     wheel = os.environ.get('TEXTGEN_TEST_LLAMA_WHEEL')
     model = os.environ.get('TEXTGEN_TEST_LLAMA_MODEL')
     if not wheel or not model:
         pytest.skip('Set TEXTGEN_TEST_LLAMA_WHEEL and TEXTGEN_TEST_LLAMA_MODEL for real inference tests.')
-    if confined:
+    if confined == 'colab' and os.geteuid() != 0:
+        pytest.skip('Colab inference needs a root supervisor to allocate the worker UID.')
+    if confined is True:
         try:
             landlock_abi()
         except VaultError as error:
@@ -68,10 +70,26 @@ def test_fresh_llama_wheel_loads_and_generates(tmp_path, confined):
             if path.is_file():
                 path.chmod((entry.external_attr >> 16) & 0o777)
     ram = Path(tempfile.mkdtemp(prefix='textgen-llama-test-', dir='/dev/shm'))
+    isolation = None
     try:
         command = [sys.executable, '-B', 'tests/vault/probe_llama.py', str(installed),
-                   str(Path(model).resolve()), str(ram), str(int(confined))]
-        result = subprocess.run(command, capture_output=True, text=True, timeout=90, check=False)
+                   str(Path(model).resolve()), str(ram), 'colab' if confined == 'colab' else str(int(confined))]
+        options = {}
+        if confined == 'colab':
+            from modules.vault_colab import ColabIsolation
+            for directory in (tmp_path, tmp_path.parent, tmp_path.parent.parent):
+                directory.chmod(0o755)
+            public_model = installed / 'probe.gguf'
+            shutil.copyfile(model, public_model)
+            public_model.chmod(0o644)
+            command[4] = str(public_model)
+            isolation = ColabIsolation()
+            (ram / 'data').mkdir()
+            isolation.claim(ram)
+            command += [str(os.getpid())]
+            command = isolation.command(ram, command)
+            options = isolation.subprocess_options()
+        result = subprocess.run(command, capture_output=True, text=True, timeout=90, check=False, **options)
         assert result.returncode == 0, result.stdout + result.stderr
         summary = json.loads(result.stdout.strip().splitlines()[-1])
         assert summary['generated_tokens'] > 0
@@ -79,3 +97,5 @@ def test_fresh_llama_wheel_loads_and_generates(tmp_path, confined):
         assert summary['installation_unchanged'] is True
     finally:
         shutil.rmtree(ram)
+        if isolation is not None:
+            isolation.close()

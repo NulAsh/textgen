@@ -3,6 +3,28 @@
 Validated against upstream `c93f8871239550de2ccfe1e95d469aa82616f07e`.
 All fixtures contain synthetic data. No user chats or passwords were used.
 
+## Colab adaptation, 2026-11-12
+
+The new optional Colab launcher uses bubblewrap with a dedicated unprivileged
+host UID, a read-only root view, private RAM devices and the vault's tmpfs
+workspace. It checks actual mount flags, privileges, parent proc access, and
+child write denial before unlocking. The normal Landlock backend remains the
+default. No unconfined fallback was added.
+
+Regression tests cover exact Colab HTTPS origin checks, secure partitioned
+session cookies, CSRF rejection, proxy-generated HTTPS configuration, encrypted
+snapshot persistence/recovery, backup failure retention, and notebook cells
+without cached outputs or password inputs. Native tests start the real worker,
+submit a queued UI event, upload content, and load a tiny model under the new
+filesystem backend. They run under a privileged CI supervisor so the worker
+can use its own host identity; native worker/model processes are unprivileged.
+
+Local Python 3.12 validation completed with **63 passed and 6 skipped**. The
+skips require Landlock or a root Colab supervisor, unavailable in this local
+test container. Native CI results will be recorded after the workflow passes.
+Live Colab proxy/cookie behavior, DriveFS synchronization and CUDA execution
+remain deployment tests; this is experimental Colab support.
+
 ## Native model loader regression, 2026-11-12
 
 A pristine llama_cpp_binaries 0.138.0 wheel contains versioned shared libraries

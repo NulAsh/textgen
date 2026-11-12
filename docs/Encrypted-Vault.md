@@ -7,6 +7,11 @@ user accounts or end-to-end encryption against the computer running inference.
 
 ## Install and start
 
+For the full interface on Google Colab, use the separate
+[encrypted Colab notebook and guide](Colab-Vault.md). It uses a verified
+bubblewrap backend with a dedicated worker UID; the local instructions below
+continue to require Landlock.
+
 Requirements:
 
 - Linux x86_64 or aarch64 with Landlock ABI 3 or newer enabled.
@@ -212,7 +217,8 @@ It does not implement a cipher or password hash itself.
   messages, character/user definitions, notebook input and output, settings,
   uploaded files, profile images, generated images and embedded prompts,
   Gradio caches, and worker diagnostic logs.
-- **Single user, local browser only.** Separate API serving, remote listening,
+- **Single user.** The normal launcher serves a local browser; the optional
+  Colab launcher permits its exact private HTTPS proxy origin. Separate API serving, remote listening,
   public sharing, Electron, arbitrary extensions/custom tools/MCP, training and
   in-app model downloads are disabled. Model directories are read-only.
 - Image generation saving is covered, but this change has not been exercised

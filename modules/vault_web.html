@@ -73,6 +73,7 @@
         $('notice').hidden = state.ready && !state.error;
         $('notice-text').textContent = state.error || 'Starting TextGen…';
         $('state').textContent = state.error ? 'Attention needed' : state.ready ? 'Vault unlocked' : 'Starting TextGen…';
+        if (state.backupEnabled && state.lastBackup && !state.error) $('state').textContent += ' · Backup ' + new Date(state.lastBackup * 1000).toLocaleTimeString();
         if (state.error) clearFrame();
         else if (state.ready && !$('textgen').hasAttribute('src')) { $('textgen').src = '/ui/'; $('textgen').hidden = false; }
       } catch { $('state').textContent = 'Connection lost'; clearFrame(); }

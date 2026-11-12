@@ -14,6 +14,7 @@ import sys
 import time
 import traceback
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import aiohttp
 from aiohttp import web
@@ -62,9 +63,23 @@ class Supervisor:
         self.guard = asyncio.Lock()
         self.proxy_tasks = set()
         self.lock_fd = None
+        self.isolation = None
+        self.colab_origin = getattr(options, 'vault_colab_origin', None)
+        self.backup_dir = getattr(options, 'vault_backup_dir', None)
+        self.last_backup = None
+        self.backup_pending = False
 
     def acquire(self):
-        landlock_abi()
+        if getattr(self.options, 'vault_isolation', 'landlock') == 'colab':
+            from modules.vault_colab import ColabIsolation
+            self.isolation = ColabIsolation()
+            try:
+                self.isolation.preflight(self.options.vault_ram_dir)
+            except BaseException:
+                self.isolation.close()
+                raise
+        else:
+            landlock_abi()
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.lock_fd = os.open(str(self.path) + ".lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
         try:
@@ -136,7 +151,7 @@ class Supervisor:
                     if creating:
                         # Validate import and create the RAM tree before creating
                         # an empty persistent vault, so migration can be retried.
-                        make_runtime(self.workspace)
+                        make_runtime(self.workspace, allow_worker_group=self.isolation is not None)
                         await asyncio.to_thread(self._seed, import_existing)
                         self.vault = await asyncio.to_thread(Vault.create, self.path, password)
                         await asyncio.to_thread(self.vault.sync, self.workspace / "data")
@@ -144,7 +159,7 @@ class Supervisor:
                         opened = await asyncio.to_thread(Vault.open, self.path, password)
                         created_workspace = False
                         try:
-                            make_runtime(self.workspace)
+                            make_runtime(self.workspace, allow_worker_group=self.isolation is not None)
                             created_workspace = True
                             await asyncio.to_thread(opened.restore, self.workspace / "data")
                         except BaseException:
@@ -154,6 +169,8 @@ class Supervisor:
                             raise
                         self.vault = opened
                     self.last_saved = time.time()
+                    self.backup_pending = True
+                    await self.save_backup(force=True)
                     await self.start_worker()
                 self.failures = 0
                 self.session = secrets.token_urlsafe(32)
@@ -167,14 +184,20 @@ class Supervisor:
     async def start_worker(self):
         log_dir = self.workspace / "data/private_logs"
         log_dir.mkdir(mode=0o700, exist_ok=True)
-        command = [sys.executable, "-B", "-m", "modules.vault_runtime", str(self.workspace), str(os.getpid())]
+        backend = 'colab' if self.isolation is not None else 'landlock'
+        command = [sys.executable, "-B", "-m", "modules.vault_runtime", str(self.workspace), str(os.getpid()), backend]
         command += self.backend_args + ["--user-data-dir", str(self.workspace / "data"),
                                        "--model-dir", str(Path(self.options.model_dir).resolve()),
                                        "--image-model-dir", str(Path(self.options.image_model_dir).resolve()),
                                        "--lora-dir", str(Path(self.options.lora_dir).resolve()), "--no-electron"]
+        subprocess_options = {}
+        if self.isolation is not None:
+            self.isolation.claim(self.workspace)
+            command = self.isolation.command(self.workspace, command)
+            subprocess_options = self.isolation.subprocess_options()
         with (log_dir / "backend.log").open("ab", buffering=0) as log:
             self.process = await asyncio.create_subprocess_exec(*command, cwd=PROJECT, stdin=asyncio.subprocess.DEVNULL,
-                                                                stdout=log, stderr=log, start_new_session=True)
+                                                                stdout=log, stderr=log, start_new_session=True, **subprocess_options)
         self.error = None
         self.ready = False
 
@@ -205,6 +228,7 @@ class Supervisor:
             if self.vault is not None:
                 try:
                     await asyncio.to_thread(self.vault.sync, self.workspace / "data")
+                    await self.save_backup(force=True)
                 except Exception:  # noqa: BLE001 - retain plaintext RAM on any persistence failure
                     self.error = "Save failed. The RAM workspace has been retained. Free disk space and retry Save and lock."
                     raise VaultError(self.error) from None
@@ -224,11 +248,13 @@ class Supervisor:
                     changed = await asyncio.to_thread(self.vault.sync, self.workspace / "data")
                     if changed:
                         self.last_saved = time.time()
+                        self.backup_pending = True
+                    await self.save_backup()
                     if self.process is not None and self.process.returncode is not None:
                         self.error = "TextGen stopped. Save and lock, then unlock to restart. Diagnostics are available below."
                         self.ready = False
-                    elif not self.ready and (self.workspace / "backend.sock").exists():
-                        connector = aiohttp.UnixConnector(path=str(self.workspace / "backend.sock"))
+                    elif not self.ready and (self.workspace / "volatile/backend.sock").exists():
+                        connector = aiohttp.UnixConnector(path=str(self.workspace / "volatile/backend.sock"))
                         async with aiohttp.ClientSession(connector=connector) as client, client.get("http://localhost/config", timeout=aiohttp.ClientTimeout(total=2)) as response:
                             self.ready = response.status == 200
                 except (TimeoutError, SnapshotBusy, aiohttp.ClientError):
@@ -237,6 +263,15 @@ class Supervisor:
                 except Exception:  # noqa: BLE001 - fail closed without logging plaintext exception details
                     self.error = "Encrypted save failed. TextGen has stopped and the RAM workspace is retained. Retry Save and lock after correcting the storage problem."
                     await self.stop_worker()
+
+    async def save_backup(self, force=False):
+        if self.backup_dir and self.vault is not None and (force or (
+                self.backup_pending and time.time() - (self.last_backup or 0) >= 60)):
+            from modules.vault_backup import save_encrypted_backup
+            content = await asyncio.to_thread(self.vault.backup)
+            await asyncio.to_thread(save_encrypted_backup, self.backup_dir, content)
+            self.last_backup = time.time()
+            self.backup_pending = False
 
     def authenticated(self, request):
         token = request.cookies.get(COOKIE, "")
@@ -261,10 +296,13 @@ def create_app(supervisor):
     @web.middleware
     async def security(request, handler):
         expected = {f"127.0.0.1:{supervisor.options.listen_port}", f"localhost:{supervisor.options.listen_port}"}
+        if supervisor.colab_origin:
+            expected.add(urlsplit(supervisor.colab_origin).netloc)
         if request.host not in expected:
             raise web.HTTPForbidden(text="Invalid Host.")
         if request.method not in ("GET", "HEAD", "OPTIONS"):
-            if request.headers.get("Origin") != f"http://{request.host}":
+            origin = supervisor.colab_origin or f"http://{request.host}"
+            if request.headers.get("Origin") != origin:
                 raise web.HTTPForbidden(text="Invalid Origin.")
             if request.path.startswith("/vault/") and not secrets.compare_digest(request.headers.get("X-Vault-CSRF", ""), supervisor.csrf):
                 raise web.HTTPForbidden(text="Invalid request token.")
@@ -287,10 +325,36 @@ def create_app(supervisor):
         response.headers["Pragma"] = "no-cache"
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
-        response.headers["X-Frame-Options"] = "SAMEORIGIN"
+        add_frame_policy(response)
         return response
 
     app = web.Application(middlewares=[security], client_max_size=256 * 1024 * 1024)
+
+    def add_frame_policy(response):
+        directives = [part.strip() for part in response.headers.get('Content-Security-Policy', '').split(';')
+                      if part.strip() and not part.strip().startswith('frame-ancestors')]
+        if supervisor.colab_origin:
+            response.headers.pop('X-Frame-Options', None)
+            # The full UI is nested inside Colab's notebook output frame.
+            directives.append("frame-ancestors 'self' https://colab.research.google.com https://*.googleusercontent.com https://*.colab.dev")
+        else:
+            response.headers['X-Frame-Options'] = 'SAMEORIGIN'
+            directives.append("frame-ancestors 'self'")
+        response.headers['Content-Security-Policy'] = '; '.join(directives)
+
+    def set_session_cookie(response, token):
+        if supervisor.colab_origin:
+            # CHIPS keeps the cookie in this notebook's top-level partition.
+            # Use the header directly for Python versions whose Morsel does
+            # not yet recognize Partitioned. Tokens are generated URL-safe.
+            value = f'{COOKIE}={token or ""}; Path=/; Secure; HttpOnly; SameSite=None; Partitioned'
+            if token is None:
+                value += '; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT'
+            response.headers.add('Set-Cookie', value)
+        elif token is None:
+            response.del_cookie(COOKIE, path='/')
+        else:
+            response.set_cookie(COOKIE, token, httponly=True, samesite='Strict', path='/')
 
     def require_auth(request):
         if not supervisor.authenticated(request):
@@ -303,7 +367,7 @@ def create_app(supervisor):
                   "authenticated": supervisor.authenticated(request), "canImport": bool(supervisor.options.vault_import)}
         html = html.replace("__CONFIG__", json.dumps(config)).replace("__NONCE__", nonce)
         response = web.Response(text=html, content_type="text/html")
-        response.headers["Content-Security-Policy"] = f"default-src 'self'; script-src 'nonce-{nonce}'; style-src 'unsafe-inline'; frame-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'"
+        response.headers["Content-Security-Policy"] = f"default-src 'self'; script-src 'nonce-{nonce}'; style-src 'unsafe-inline'; frame-src 'self'; object-src 'none'; base-uri 'none'"
         return response
 
     async def unlock(request):
@@ -312,20 +376,21 @@ def create_app(supervisor):
         data = await request.json()
         token = await supervisor.unlock(data.get("password"), data.get("confirmation"), data.get("importExisting") is True)
         response = web.json_response({"ok": True})
-        response.set_cookie(COOKIE, token, httponly=True, samesite="Strict", path="/")
+        set_session_cookie(response, token)
         return response
 
     async def lock(request):
         require_auth(request)
         await supervisor.lock()
         response = web.json_response({"ok": True})
-        response.del_cookie(COOKIE, path="/")
+        set_session_cookie(response, None)
         response.headers["Clear-Site-Data"] = '"cache", "storage"'
         return response
 
     async def status(request):
         require_auth(request)
-        return web.json_response({"ready": supervisor.ready, "error": supervisor.error, "lastSaved": supervisor.last_saved})
+        return web.json_response({"ready": supervisor.ready, "error": supervisor.error, "lastSaved": supervisor.last_saved,
+                                  "lastBackup": supervisor.last_backup, "backupEnabled": bool(supervisor.backup_dir)})
 
     async def backup(request):
         require_auth(request)
@@ -333,6 +398,7 @@ def create_app(supervisor):
             if supervisor.vault is None:
                 raise web.HTTPConflict(text="Vault is locked.")
             await asyncio.to_thread(supervisor.vault.sync, supervisor.workspace / "data")
+            await supervisor.save_backup(force=True)
             data = await asyncio.to_thread(supervisor.vault.backup)
         return web.Response(body=data, content_type="application/octet-stream", headers={"Content-Disposition": 'attachment; filename="textgen-vault-backup.sqlite3"'})
 
@@ -345,6 +411,7 @@ def create_app(supervisor):
             raise VaultError("The two new passwords do not match.")
         async with supervisor.guard:
             await asyncio.to_thread(supervisor.vault.change_password, data.get("oldPassword"), data.get("newPassword"))
+            await supervisor.save_backup(force=True)
         return web.json_response({"ok": True})
 
     async def diagnostics(request):
@@ -369,11 +436,17 @@ def create_app(supervisor):
         task = asyncio.current_task()
         supervisor.proxy_tasks.add(task)
         try:
-            connector = aiohttp.UnixConnector(path=str(supervisor.workspace / "backend.sock"))
+            connector = aiohttp.UnixConnector(path=str(supervisor.workspace / "volatile/backend.sock"))
             async with aiohttp.ClientSession(connector=connector, auto_decompress=False,
                                              timeout=aiohttp.ClientTimeout(total=None, sock_connect=10)) as client:
                 headers = {k: v for k, v in request.headers.items() if k.lower() not in HOP_HEADERS | {"host", "cookie", "authorization", "forwarded"} and not k.lower().startswith("x-forwarded-")}
                 headers["Host"] = request.host
+                if supervisor.colab_origin:
+                    # Derive these from explicit configuration, never untrusted
+                    # incoming forwarded headers. Gradio needs HTTPS asset URLs.
+                    headers['Host'] = urlsplit(supervisor.colab_origin).netloc
+                    headers['X-Forwarded-Host'] = headers['Host']
+                    headers['X-Forwarded-Proto'] = 'https'
                 # Preserve encoded file URLs and query strings exactly.
                 from yarl import URL
                 target = URL("http://localhost" + request.raw_path[len("/ui"):], encoded=True)
@@ -381,6 +454,7 @@ def create_app(supervisor):
                     out_headers = {k: v for k, v in upstream.headers.items() if k.lower() not in HOP_HEADERS | {"set-cookie"}}
                     out_headers.update({"Cache-Control": "no-store, max-age=0", "Pragma": "no-cache", "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff", "X-Frame-Options": "SAMEORIGIN"})
                     response = web.StreamResponse(status=upstream.status, headers=out_headers)
+                    add_frame_policy(response)
                     try:
                         await response.prepare(request)
                         async for chunk in upstream.content.iter_any():
@@ -423,6 +497,8 @@ def create_app(supervisor):
         finally:
             if supervisor.lock_fd is not None:
                 os.close(supervisor.lock_fd)
+            if supervisor.isolation is not None:
+                supervisor.isolation.close()
 
     app.cleanup_ctx.append(lifecycle)
     return app
@@ -438,9 +514,27 @@ def parse_args(argv=None):
     parser.add_argument("--image-model-dir", default=str(PROJECT / "user_data/image_models"))
     parser.add_argument("--lora-dir", default=str(PROJECT / "user_data/loras"))
     parser.add_argument("--auto-launch", action="store_true")
+    parser.add_argument('--vault-isolation', choices=('landlock', 'colab'), default='landlock')
+    parser.add_argument('--vault-colab-origin', help='Exact HTTPS origin returned by the private Colab port proxy')
+    parser.add_argument('--vault-backup-dir', help='Optional folder for periodic encrypted snapshots, such as mounted Google Drive')
     options, backend = parser.parse_known_args(argv)
     if not 1 <= options.listen_port <= 65535:
         parser.error("--listen-port must be between 1 and 65535")
+    if options.vault_colab_origin:
+        try:
+            parsed = urlsplit(options.vault_colab_origin)
+            valid = (parsed.scheme == 'https' and parsed.hostname and parsed.hostname.endswith(('-colab.googleusercontent.com', '.colab.dev'))
+                     and not parsed.username and not parsed.password and parsed.port in (None, 443)
+                     and parsed.path in ('', '/') and not parsed.query and not parsed.fragment)
+        except ValueError:
+            valid = False
+        if not valid:
+            parser.error('--vault-colab-origin must be an exact HTTPS Colab proxy origin')
+        options.vault_colab_origin = 'https://' + parsed.hostname
+    if options.vault_backup_dir:
+        backup_dir = Path(options.vault_backup_dir).resolve()
+        if Path(options.vault).resolve() in (backup_dir / 'vault-latest.sqlite3', backup_dir / 'vault-previous.sqlite3'):
+            parser.error('Use a local active vault; the backup folder must contain separate snapshots')
     # Reject abbreviations of restricted upstream options as well.
     for argument in backend:
         flag = argument.split("=", 1)[0]
@@ -455,7 +549,8 @@ def main():
     options, backend = parse_args()
     try:
         supervisor = Supervisor(options, backend)
-        landlock_abi()
+        if options.vault_isolation == 'landlock':
+            landlock_abi()
     except VaultError as error:
         raise SystemExit(str(error)) from None
     if options.auto_launch:

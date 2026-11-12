@@ -100,6 +100,73 @@ async def test_password_change_requires_old_password(app):
 
 
 @pytest.mark.asyncio
+async def test_colab_gateway_keeps_exact_origin_and_partitioned_session(app):
+    supervisor, client = app
+    origin = 'https://session-7860-colab.googleusercontent.com'
+    supervisor.colab_origin = origin
+    client.session.headers['Origin'] = origin
+    response = await client.get('/')
+    assert 'X-Frame-Options' not in response.headers
+    assert 'https://colab.research.google.com' in response.headers['Content-Security-Policy']
+    assert "script-src 'nonce-" in response.headers['Content-Security-Policy']
+    response = await client.post('/vault/unlock', json={'password': PASSWORD, 'confirmation': PASSWORD})
+    assert response.status == 200
+    cookie = response.headers['Set-Cookie']
+    assert all(attribute in cookie for attribute in ('Secure', 'HttpOnly', 'SameSite=None', 'Partitioned'))
+    client.session.headers['Cookie'] = f'{gateway.COOKIE}={supervisor.session}'
+    assert (await client.get('/vault/status')).status == 200
+    assert (await client.get('/vault/status', headers={'Host': origin.removeprefix('https://')})).status == 200
+    assert (await client.get('/vault/status', headers={'Host': 'other-colab.googleusercontent.com'})).status == 403
+    assert (await client.post('/vault/lock', headers={'Origin': 'https://other-colab.googleusercontent.com'})).status == 403
+    assert (await client.post('/vault/lock', headers={'X-Vault-CSRF': 'incorrect'})).status == 403
+    response = await client.post('/vault/lock')
+    assert response.status == 200
+    assert 'Partitioned' in response.headers['Set-Cookie'] and 'Max-Age=0' in response.headers['Set-Cookie']
+    assert (await client.get('/vault/status')).status == 401
+
+
+@pytest.mark.asyncio
+async def test_persistent_snapshots_remain_encrypted_and_restore(app, tmp_path):
+    from modules.vault_store import Vault
+    supervisor, client = app
+    supervisor.backup_dir = str(tmp_path / 'drive')
+    await unlock(client)
+    secret = 'PRIVATE-COLAB-BACKUP-SENTINEL'
+    (supervisor.workspace / 'data/settings.yaml').write_text(secret)
+    response = await client.post('/vault/lock')
+    assert response.status == 200
+    latest = tmp_path / 'drive/vault-latest.sqlite3'
+    previous = tmp_path / 'drive/vault-previous.sqlite3'
+    assert latest.is_file() and previous.is_file()
+    assert secret.encode() not in latest.read_bytes() + previous.read_bytes()
+    restored = Vault.open(latest, PASSWORD)
+    try:
+        restored.restore(tmp_path / 'restored')
+        assert (tmp_path / 'restored/settings.yaml').read_text() == secret
+    finally:
+        restored.close()
+
+
+@pytest.mark.asyncio
+async def test_backup_failure_retains_ram_for_retry(app, monkeypatch, tmp_path):
+    from modules import vault_backup
+    supervisor, client = app
+    await unlock(client)
+    supervisor.backup_dir = str(tmp_path / 'drive')
+    original = vault_backup.save_encrypted_backup
+    def fail(*args):
+        raise OSError('synthetic Drive failure')
+    monkeypatch.setattr(vault_backup, 'save_encrypted_backup', fail)
+    response = await client.post('/vault/lock')
+    assert response.status == 400
+    assert supervisor.workspace.exists() and supervisor.vault is not None
+    monkeypatch.setattr(vault_backup, 'save_encrypted_backup', original)
+    supervisor.last_attempt = 0
+    await unlock(client)
+    assert (await client.post('/vault/lock')).status == 200
+
+
+@pytest.mark.asyncio
 async def test_failed_lock_retains_ram_and_does_not_claim_success(app, monkeypatch):
     supervisor, client = app
     await unlock(client)

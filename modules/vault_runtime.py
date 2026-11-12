@@ -59,7 +59,7 @@ def launch(blocks, allowed_paths):
 
     global _server, _thread
     close()
-    socket_path = WORKSPACE / "backend.sock"
+    socket_path = WORKSPACE / "volatile/backend.sock"
     socket_path.unlink(missing_ok=True)
     app = build_app(blocks, allowed_paths)
     _server = uvicorn.Server(uvicorn.Config(app, uds=str(socket_path), log_level="warning", access_log=False))
@@ -92,12 +92,16 @@ def main():
     # passed to the worker; it gets access to the transient plaintext tree.
     WORKSPACE = Path(sys.argv[1]).resolve()
     parent_pid = int(sys.argv[2])
-    bind_to_parent(parent_pid)
+    backend = sys.argv[3]
+    if backend not in ('landlock', 'colab'):
+        raise RuntimeError('Unknown vault isolation backend.')
+    # bubblewrap watches the supervisor; the worker watches bubblewrap.
+    bind_to_parent(os.getppid() if backend == 'colab' else parent_pid)
     disable_core_dumps()
     os.umask(0o077)
     volatile = WORKSPACE / "volatile"
     volatile.mkdir(mode=0o700, exist_ok=True)
-    for name in ("TMPDIR", "TMP", "TEMP", "XDG_CACHE_HOME", "HF_HOME", "TORCH_HOME", "MPLCONFIGDIR", "NUMBA_CACHE_DIR"):
+    for name in ("TMPDIR", "TMP", "TEMP", "XDG_CACHE_HOME", "HF_HOME", "TORCH_HOME", "MPLCONFIGDIR", "NUMBA_CACHE_DIR", "CUDA_CACHE_PATH"):
         directory = volatile / name.lower()
         directory.mkdir(mode=0o700, exist_ok=True)
         os.environ[name] = str(directory)
@@ -109,10 +113,14 @@ def main():
     sys.dont_write_bytecode = True
     # Must run on the initial, single worker thread BEFORE importing Gradio,
     # model runtimes, or any code that creates threads or subprocesses.
-    confine_writes(WORKSPACE)
+    if backend == 'colab':
+        from modules.vault_colab import verify_sandbox
+        verify_sandbox(WORKSPACE, parent_pid)
+    else:
+        confine_writes(WORKSPACE)
     ACTIVE = True
     project = Path(__file__).resolve().parent.parent
-    sys.argv = [str(project / "server.py")] + sys.argv[3:]
+    sys.argv = [str(project / "server.py")] + sys.argv[4:]
     runpy.run_path(str(project / "server.py"), run_name="__main__")
 
 

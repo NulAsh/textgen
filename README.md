@@ -5,7 +5,7 @@ This fork adds **single-user encryption at rest with browser-based unlocking**.
 only after unlocking. Chats, prompts, settings, uploads, images and diagnostic
 logs are persisted in an authenticated encrypted database.
 
-**This implementation requires Linux (x86_64/aarch64), Python 3.11+, tmpfs and
+**The local launcher requires Linux (x86_64/aarch64), Python 3.11+, tmpfs and
 Landlock ABI 3+.** It is a source fork; upstream desktop downloads do not contain
 these changes. Separate API serving, extensions, custom tools/MCP, training and
 in-app model downloads are unavailable in this version.
@@ -14,6 +14,11 @@ Read **[Encrypted Vault setup and security boundaries](docs/Encrypted-Vault.md)*
 before using it. Start with synthetic data while validating your model backend.
 The upstream README below describes upstream features; the vault guide takes
 precedence for this fork.
+
+**Colab:** [Open the encrypted GPU notebook](https://colab.research.google.com/github/NulAsh/textgen/blob/main/Colab-Encrypted-TextGen.ipynb).
+This experimental launcher keeps the full interface and uses a verified
+bubblewrap filesystem sandbox when Landlock is unavailable. Read the
+[Colab setup and limitations](docs/Colab-Vault.md) first.
 
 ---
 
