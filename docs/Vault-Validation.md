@@ -30,8 +30,14 @@ proxy errors in encrypted diagnostics.
 Local Python 3.12.14 and 3.14.10 tests each passed **49 tests with 3
 Landlock-dependent skips**.
 The CPU wheel and Vulkan wheel both loaded the tiny model and generated tokens
-on the CPU. This does not exercise GPU offload. The native CI results will be
-recorded after the published workflow completes.
+on the CPU. This does not exercise GPU offload.
+
+[CI run 43174028306](https://github.com/NulAsh/textgen/actions/runs/43174028306)
+passed **all 52 tests with no skips on both Python 3.11 and 3.14**, with Landlock
+ABI 8. This includes fresh-wheel CPU model loading, streamed inference and
+authentication under the production write restrictions, plus the real confined
+web worker and queue. Ruff also passed in both jobs. This validates
+implementation commit `d22bc665995c0efabbb22a60cbc4c65e2d767b37`.
 
 ## Queue regression, 2026-11-11
 
