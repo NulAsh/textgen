@@ -23,7 +23,19 @@ can use its own host identity; native worker/model processes are unprivileged.
 
 Local Python 3.12 validation completed with **65 passed and 6 skipped**. The
 skips require Landlock or a root Colab supervisor, unavailable in this local
-test container. Native CI results will be recorded after the workflow passes.
+test container.
+
+[CI run 43245163080](https://github.com/NulAsh/textgen/actions/runs/43245163080)
+passed **all 71 distinct tests on Python 3.11, 3.13 and 3.14**, validating
+implementation commit `59c89f28e0afc5e69de5ad24ffe452dc6955419d`. Each job ran
+68 ordinary tests successfully, then ran the 3 privileged-supervisor Colab
+tests successfully in a separate step. Ruff passed on all three versions.
+This includes actual child write/namespace denial, the real worker's queued
+page-load event and upload, encrypted restoration, and tiny-model streamed
+CPU inference under the Colab filesystem and syscall restrictions. The CI
+host loads Ubuntu's supplied Bubblewrap AppArmor profile and retains the
+system-wide user-namespace restriction.
+
 Live Colab proxy/cookie behavior, DriveFS synchronization and CUDA execution
 remain deployment tests; this is experimental Colab support.
 
