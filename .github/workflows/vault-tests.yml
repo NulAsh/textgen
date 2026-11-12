@@ -27,7 +27,16 @@ jobs:
       - name: Require native write isolation
         run: python -c 'from modules.vault_linux import landlock_abi; print("Landlock ABI", landlock_abi())'
       - name: Install Colab filesystem sandbox
-        run: sudo apt-get update -qq && sudo apt-get install -y bubblewrap
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y bubblewrap apparmor-profiles
+          # Ubuntu's supplied profile permits bwrap's setup and restricts its
+          # children. Keep the system-wide user-namespace restriction enabled.
+          if [ -f /etc/apparmor.d/bwrap-userns-restrict ]; then
+            sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
+          else
+            sudo apparmor_parser -r /usr/share/apparmor/extra-profiles/bwrap-userns-restrict
+          fi
       - name: Download pinned native inference fixtures
         run: |
           curl --fail --location --retry 3 'https://github.com/oobabooga/llama-cpp-binaries/releases/download/v0.138.0/llama_cpp_binaries-0.138.0%2Bcpu-py3-none-linux_x86_64.whl' --output "$RUNNER_TEMP/llama-cpu.whl"
