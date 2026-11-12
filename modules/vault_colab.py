@@ -8,6 +8,7 @@ Every launch verifies the resulting mount layout before importing TextGen.
 
 import argparse
 import ctypes
+import errno
 import fcntl
 import json
 import os
@@ -24,15 +25,59 @@ from modules.vault_linux import disable_core_dumps, verify_tmpfs
 from modules.vault_store import VaultError
 
 
-def verify_sandbox(workspace, supervisor_pid):
+def create_syscall_filter():
+    """Block namespace/mount changes without writing container sysctls.
+
+    Bubblewrap loads this filter before executing Python. Colab can expose a
+    read-only /proc/sys, where bubblewrap's --disable-userns cannot work.
+    """
+    class Argument(ctypes.Structure):
+        _fields_ = [('arg', ctypes.c_uint), ('op', ctypes.c_int),
+                    ('datum_a', ctypes.c_uint64), ('datum_b', ctypes.c_uint64)]
+
+    try:
+        library = ctypes.CDLL('libseccomp.so.2', use_errno=True)
+    except OSError as error:
+        raise VaultError('Install libseccomp2 before starting the Colab vault.') from error
+    library.seccomp_init.argtypes = [ctypes.c_uint32]
+    library.seccomp_init.restype = ctypes.c_void_p
+    library.seccomp_release.argtypes = [ctypes.c_void_p]
+    library.seccomp_syscall_resolve_name.argtypes = [ctypes.c_char_p]
+    library.seccomp_rule_add_array.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_int,
+                                             ctypes.c_uint, ctypes.POINTER(Argument)]
+    library.seccomp_export_bpf.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    context = library.seccomp_init(0x7fff0000)  # SCMP_ACT_ALLOW; other architectures are refused.
+    if not context:
+        raise VaultError('Unable to initialize the Colab syscall filter.')
+    fd = None
+    try:
+        blocked = ('unshare', 'setns', 'mount', 'umount2', 'pivot_root', 'move_mount',
+                   'open_tree', 'fsopen', 'fsconfig', 'fsmount', 'fspick', 'mount_setattr')
+        for name in (*blocked, 'clone', 'clone3'):
+            number = library.seccomp_syscall_resolve_name(name.encode())
+            if number < 0:
+                raise VaultError('libseccomp is too old for the required Colab syscall filter.')
+            # clone3 has pointer-based arguments: return ENOSYS so libraries
+            # fall back to clone(), whose CLONE_NEWUSER bit can be checked.
+            action = 0x00050000 | (errno.ENOSYS if name == 'clone3' else errno.EPERM)
+            argument = Argument(0, 7, 0x10000000, 0x10000000)  # SCMP_CMP_MASKED_EQ, CLONE_NEWUSER
+            count = int(name == 'clone')
+            if library.seccomp_rule_add_array(context, action, number, count, ctypes.byref(argument) if count else None) < 0:
+                raise VaultError('Unable to build the Colab syscall filter.')
+        fd = os.memfd_create('textgen-vault-seccomp', os.MFD_CLOEXEC)
+        if library.seccomp_export_bpf(context, fd) < 0:
+            raise VaultError('Unable to export the Colab syscall filter.')
+        # Only a read descriptor is inherited by bubblewrap, which consumes it.
+        readonly = os.open(f'/proc/self/fd/{fd}', os.O_RDONLY | os.O_CLOEXEC)
+        return readonly
+    finally:
+        library.seccomp_release(context)
+        if fd is not None:
+            os.close(fd)
+
+
+def verify_mounts(workspace):
     workspace = Path(workspace).resolve()
-    verify_tmpfs(workspace)
-    libc = ctypes.CDLL(None, use_errno=True)
-    if os.getuid() == 0 or libc.prctl(39, 0, 0, 0, 0) != 1:  # PR_GET_NO_NEW_PRIVS
-        raise VaultError('Colab worker privilege isolation was not applied.')
-    status = dict(line.split(':', 1) for line in Path('/proc/self/status').read_text().splitlines() if ':' in line)
-    if any(int(status[name].strip(), 16) for name in ('CapEff', 'CapPrm', 'CapAmb')):
-        raise VaultError('Colab worker still has capabilities.')
     if not os.statvfs('/').f_flag & os.ST_RDONLY:
         raise VaultError('Colab worker root filesystem is writable.')
     # Verify every visible writable mount, including mounts below a read-only
@@ -42,14 +87,48 @@ def verify_sandbox(workspace, supervisor_pid):
         mount = Path(fields[4].replace('\\040', ' ').replace('\\011', '\t').replace('\\012', '\n').replace('\\134', '\\'))
         if 'rw' not in fields[5].split(','):
             continue
+        # mountinfo also lists hidden mounts below overmounts. Resolve the
+        # actual reachable mount ID instead of mistaking an obscured host
+        # mount for the worker's view. No capabilities or new namespaces can
+        # be used to uncover these mounts after setup.
+        try:
+            fd = os.open(mount, os.O_PATH | os.O_CLOEXEC)
+        except (PermissionError, FileNotFoundError, NotADirectoryError):
+            continue
+        try:
+            info = dict(line.split(':', 1) for line in Path(f'/proc/self/fdinfo/{fd}').read_text().splitlines())
+            if info['mnt_id'].strip() != fields[0]:
+                continue
+        finally:
+            os.close(fd)
         kind = fields[fields.index('-') + 1]
         if kind == 'tmpfs' and (mount == workspace or workspace in mount.parents or mount == Path('/dev') or Path('/dev') in mount.parents):
             continue
         if kind == 'devpts' and mount == Path('/dev/pts'):
             continue
-        if mount.parent == Path('/dev') and mount.name.startswith('nvidia') and stat.S_ISCHR(mount.stat().st_mode):
+        device = ((mount.parent == Path('/dev') and (mount.name in {'null', 'zero', 'full', 'random', 'urandom', 'tty'}
+                   or mount.name.startswith('nvidia'))) or mount.parent == Path('/dev/nvidia-caps'))
+        if device and stat.S_ISCHR(mount.stat().st_mode):
             continue
         raise VaultError('Colab sandbox contains an unexpected writable mount.')
+
+
+def verify_sandbox(workspace, supervisor_pid):
+    verify_tmpfs(workspace)
+    libc = ctypes.CDLL(None, use_errno=True)
+    if os.getuid() == 0 or libc.prctl(39, 0, 0, 0, 0) != 1:  # PR_GET_NO_NEW_PRIVS
+        raise VaultError('Colab worker privilege isolation was not applied.')
+    status = dict(line.split(':', 1) for line in Path('/proc/self/status').read_text().splitlines() if ':' in line)
+    if any(int(status[name].strip(), 16) for name in ('CapEff', 'CapPrm', 'CapAmb')):
+        raise VaultError('Colab worker still has capabilities.')
+    # Probe in a child so a rejected unconfined entry never changes the
+    # caller's namespace. Children must inherit the same irreversible filter.
+    code = ('import ctypes, errno, sys; libc = ctypes.CDLL(None, use_errno=True); '
+            'sys.exit(0 if libc.unshare(0x10000000) == -1 and ctypes.get_errno() == errno.EPERM else 1)')
+    if status['Seccomp'].strip() != '2' or subprocess.run(
+            [sys.executable, '-B', '-c', code], capture_output=True, check=False, timeout=10).returncode:
+        raise VaultError('Colab worker can create new user namespaces.')
+    verify_mounts(workspace)
     # These must never provide a route back to the supervisor's writable root.
     for pid in {supervisor_pid, os.getppid()}:
         try:
@@ -79,6 +158,7 @@ class ColabIsolation:
                 pass
         self.uid = None
         self.lock_fd = None
+        self.filter_fd = None
         verify_tmpfs('/dev/shm')
         for uid in range(60000 + secrets.randbelow(10000), 100000):
             if uid in used:
@@ -97,11 +177,19 @@ class ColabIsolation:
             break
         if self.uid is None:
             raise VaultError('Cannot allocate an isolated Colab worker identity.')
+        try:
+            self.filter_fd = create_syscall_filter()
+        except BaseException:
+            self.close()
+            raise
 
     def close(self):
         if self.lock_fd is not None:
             os.close(self.lock_fd)
             self.lock_fd = None
+        if self.filter_fd is not None:
+            os.close(self.filter_fd)
+            self.filter_fd = None
 
     def claim(self, workspace):
         """Give the worker only its private RAM tree; never chmod host paths."""
@@ -122,7 +210,8 @@ class ColabIsolation:
 
     def command(self, workspace, command):
         workspace = str(Path(workspace).resolve())
-        args = [self.binary, '--unshare-user', '--disable-userns', '--cap-drop', 'ALL',
+        os.lseek(self.filter_fd, 0, os.SEEK_SET)
+        args = [self.binary, '--unshare-user', '--seccomp', str(self.filter_fd), '--cap-drop', 'ALL',
                 '--die-with-parent', '--ro-bind', '/', '/', '--dev', '/dev',
                 '--bind', workspace, workspace]
         # No block devices, host shared memory, terminals or broad /dev bind.
@@ -136,7 +225,7 @@ class ColabIsolation:
         return args + ['--'] + list(command)
 
     def subprocess_options(self):
-        return {'user': self.uid, 'group': self.uid, 'extra_groups': []}
+        return {'user': self.uid, 'group': self.uid, 'extra_groups': [], 'pass_fds': (self.filter_fd,)}
 
     def preflight(self, ram_dir='/dev/shm'):
         """Test real isolation, including child inheritance, before decrypting."""
@@ -175,9 +264,14 @@ def probe(workspace, parent, outside):
             pass
         else:
             raise AssertionError('Unconfined write succeeded')
-    code = 'from pathlib import Path; Path(' + repr(str(outside)) + ').write_text("forbidden")'
-    child = subprocess.run([sys.executable, '-B', '-c', code], capture_output=True, check=False)
-    if child.returncode == 0:
+    code = ('import ctypes, errno\nfrom pathlib import Path\n'
+            'libc = ctypes.CDLL(None, use_errno=True)\n'
+            'assert libc.unshare(0x10000000) == -1 and ctypes.get_errno() == errno.EPERM\n'
+            'try:\n    Path(' + repr(str(outside)) + ').write_text("forbidden")\n'
+            'except OSError:\n    print("isolated")\n'
+            'else:\n    raise AssertionError("Child write succeeded")\n')
+    child = subprocess.run([sys.executable, '-B', '-c', code], capture_output=True, text=True, check=False)
+    if child.returncode or child.stdout.strip() != 'isolated':
         raise AssertionError('Child did not inherit isolation')
     print('isolated')
 

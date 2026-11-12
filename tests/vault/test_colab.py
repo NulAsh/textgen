@@ -1,12 +1,15 @@
 import json
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from modules.vault_colab import ColabIsolation, verify_sandbox
+from modules.vault_colab import ColabIsolation, create_syscall_filter, verify_sandbox
 from modules.vault_gateway import parse_args
 from modules.vault_store import VaultError
 
@@ -44,6 +47,34 @@ def test_colab_worker_refuses_unconfined_entry():
         with pytest.raises(VaultError):
             verify_sandbox(ram, os.getpid())
     finally:
+        shutil.rmtree(ram)
+
+
+@pytest.mark.parametrize('expose_disk', [False, True])
+def test_real_mount_verifier_distinguishes_hidden_and_writable_mounts(tmp_path, expose_disk):
+    binary = shutil.which('bwrap')
+    if not binary:
+        pytest.skip('Install bubblewrap to test actual mount layouts.')
+    ram = Path(tempfile.mkdtemp(prefix='textgen-mount-test-', dir='/dev/shm'))
+    filter_fd = create_syscall_filter()
+    try:
+        # Exercise the mount verifier under the current test identity; the
+        # separate root CI tests additionally check the production UID drop.
+        code = ('import ctypes, errno; libc = ctypes.CDLL(None, use_errno=True); '
+                'assert libc.unshare(0x10000000) == -1 and ctypes.get_errno() == errno.EPERM; '
+                f'from modules.vault_colab import verify_mounts; verify_mounts({str(ram)!r})')
+        command = ColabIsolation.command(SimpleNamespace(binary=binary, filter_fd=filter_fd), ram, [sys.executable, '-B', '-c', code])
+        if expose_disk:
+            index = command.index('--')
+            command[index:index] = ['--bind', str(tmp_path), str(tmp_path)]
+        result = subprocess.run(command, capture_output=True, text=True, check=False, timeout=30, pass_fds=(filter_fd,))
+        if expose_disk:
+            assert result.returncode != 0
+            assert 'unexpected writable mount' in result.stderr
+        else:
+            assert result.returncode == 0, result.stderr
+    finally:
+        os.close(filter_fd)
         shutil.rmtree(ram)
 
 

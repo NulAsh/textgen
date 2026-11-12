@@ -53,18 +53,22 @@ copied back as the latest in a fresh runtime, preserving both originals first.
 
 ## Isolation without Landlock
 
-`--vault-isolation colab` requires the root notebook runtime and bubblewrap.
+`--vault-isolation colab` requires the root notebook runtime, bubblewrap and
+libseccomp2.
 The supervisor reserves an unused host UID/GID for its worker and drops to that
 identity **before** running bubblewrap. The worker gets a read-only view of the
 runtime filesystem, a private RAM-backed `/dev`, selected NVIDIA character
 devices, and access to its writable tmpfs workspace. Capabilities are dropped,
-new privileges and further user namespaces are disabled, and children inherit
-the mount restrictions. No disk-backed temporary directory is substituted.
+new privileges are disabled, and an inherited seccomp filter blocks new user
+namespaces and mount changes. The filter is installed by bubblewrap before
+Python executes; it does not need to write Colab's read-only `/proc/sys`.
+Children inherit the mount restrictions. No disk-backed temporary directory
+is substituted.
 
 Colab denies creating new proc mounts. This launcher reuses the read-only proc
 view, while the separate host identity prevents traversal through the notebook
 or supervisor's `/proc/PID/root` and descriptors. Startup verifies the actual
-mount flags and capabilities, tests denial against a world-writable host file
+reachable mount flags and capabilities, tests denial against a world-writable host file
 and parent proc paths, and checks child-process inheritance. The worker repeats
 the mount/privilege checks before importing TextGen or model libraries.
 
@@ -94,6 +98,9 @@ Colab's embedded frames. If the proxy format changes, the launcher stops rather
 than trusting an arbitrary hostname. The session URL changes with the runtime.
 The notebook stores no password and saves no rendered chat content in its cell
 outputs. Avoid manually printing private data into notebook output.
+Diagnostics opens within the authenticated frame so its partitioned cookie
+remains available. The stop cell refuses to end a session with an unlocked or
+retained RAM workspace; complete **Save and lock** first.
 
 Google's [usage restrictions](https://research.google.com/colaboratory/faq.html#limitations-and-restrictions)
 continue to apply, including the free-tier restriction on primarily using a

@@ -36,7 +36,7 @@
   <main id="unlocked" hidden>
     <nav id="toolbar" aria-label="Vault controls">
       <strong>TextGen · Encrypted vault</strong><span id="state" role="status">Starting TextGen…</span>
-      <a id="diagnostics" href="/vault/diagnostics" target="_blank" rel="noopener">Diagnostics</a>
+      <button id="diagnostics" class="secondary">Diagnostics</button>
       <button id="backup" class="secondary">Encrypted backup</button>
       <button id="change" class="secondary">Change password</button>
       <button id="lock">Save and lock</button>
@@ -44,6 +44,11 @@
     <div id="notice"><p id="notice-text">Starting TextGen…</p></div>
     <iframe id="textgen" title="TextGen" hidden allow="clipboard-write"></iframe>
   </main>
+  <dialog id="diagnostics-dialog" style="width:90vw;max-width:1100px">
+    <h2>Diagnostics</h2>
+    <pre id="diagnostics-output" style="max-height:65vh;overflow:auto;white-space:pre-wrap"></pre>
+    <button id="close-diagnostics" type="button" class="secondary">Close</button>
+  </dialog>
   <dialog id="password-dialog">
     <form id="password-form">
       <h2>Change vault password</h2>
@@ -81,6 +86,17 @@
     function showApp() { $('unlock-form').reset(); $('locked').hidden = true; $('unlocked').hidden = false; poll(); clearInterval(timer); timer = setInterval(poll, 2000); }
     if (config.creating) { $('heading').textContent = 'Create an encrypted vault'; $('intro').textContent = 'Protect your chats, system prompts, uploads, and generated content with one password.'; $('create-fields').hidden = false; $('confirmation').required = true; $('password').minLength = 12; $('unlock-button').textContent = 'Create vault'; $('import-option').hidden = !config.canImport; }
     if (config.authenticated) showApp();
+    $('diagnostics').addEventListener('click', async () => {
+      // Keep authenticated requests in the notebook's cookie partition.
+      $('diagnostics-output').textContent = 'Loading…'; $('diagnostics-dialog').showModal();
+      try {
+        const response = await fetch('/vault/diagnostics', {cache:'no-store'});
+        if (!response.ok) throw new Error('Unlock the vault to view diagnostics.');
+        $('diagnostics-output').textContent = await response.text();
+      } catch (e) { $('diagnostics-output').textContent = e.message; }
+    });
+    $('close-diagnostics').addEventListener('click', () => $('diagnostics-dialog').close());
+    $('diagnostics-dialog').addEventListener('close', () => { $('diagnostics-output').textContent = ''; });
     $('unlock-form').addEventListener('submit', async event => {
       event.preventDefault(); $('unlock-button').disabled = true; $('unlock-error').textContent = '';
       const data = {password:$('password').value, confirmation:$('confirmation').value, importExisting:$('import-existing').checked};
