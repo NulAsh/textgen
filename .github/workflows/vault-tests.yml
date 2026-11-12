@@ -26,7 +26,16 @@ jobs:
         run: python -m pip install -r requirements/portable/requirements_nowheels.txt pytest pytest-asyncio ruff
       - name: Require native write isolation
         run: python -c 'from modules.vault_linux import landlock_abi; print("Landlock ABI", landlock_abi())'
+      - name: Download pinned native inference fixtures
+        run: |
+          curl --fail --location --retry 3 'https://github.com/oobabooga/llama-cpp-binaries/releases/download/v0.138.0/llama_cpp_binaries-0.138.0%2Bcpu-py3-none-linux_x86_64.whl' --output "$RUNNER_TEMP/llama-cpu.whl"
+          curl --fail --location --retry 3 'https://huggingface.co/ggml-org/tiny-llamas/resolve/def3e2dd70df35ecbf6403ea347de4c5977220c1/stories260K.gguf' --output "$RUNNER_TEMP/stories260K.gguf"
+          echo "0b3a0bdd21cf1684a47c269623c67300c815454647ec37f3217f6df054c00f59  $RUNNER_TEMP/llama-cpu.whl" | sha256sum --check
+          echo "047bf46455a544931cff6fef14d7910154c56afbc23ab1c5e56a72e69912c04b  $RUNNER_TEMP/stories260K.gguf" | sha256sum --check
       - name: Test encrypted storage, gateway and native worker
+        env:
+          TEXTGEN_TEST_LLAMA_WHEEL: ${{ runner.temp }}/llama-cpu.whl
+          TEXTGEN_TEST_LLAMA_MODEL: ${{ runner.temp }}/stories260K.gguf
         run: python -m pytest -q -rs tests/vault
       - name: Lint vault code
         run: ruff check modules/vault_*.py tests/vault --output-format concise

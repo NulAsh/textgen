@@ -381,12 +381,21 @@ def create_app(supervisor):
                     out_headers = {k: v for k, v in upstream.headers.items() if k.lower() not in HOP_HEADERS | {"set-cookie"}}
                     out_headers.update({"Cache-Control": "no-store, max-age=0", "Pragma": "no-cache", "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff", "X-Frame-Options": "SAMEORIGIN"})
                     response = web.StreamResponse(status=upstream.status, headers=out_headers)
-                    await response.prepare(request)
-                    async for chunk in upstream.content.iter_any():
-                        if not supervisor.authenticated(request):
-                            break
-                        await response.write(chunk)
-                    await response.write_eof()
+                    try:
+                        await response.prepare(request)
+                        async for chunk in upstream.content.iter_any():
+                            if not supervisor.authenticated(request):
+                                break
+                            await response.write(chunk)
+                        await response.write_eof()
+                    except (ConnectionResetError, BrokenPipeError):
+                        # Reloading/closing a page ends its SSE stream. Do not
+                        # log a vault failure or attempt a new HTTP 500 after
+                        # headers have been sent to a disconnected browser.
+                        # A live downstream still needs upstream diagnostics.
+                        if request.transport is not None and not request.transport.is_closing():
+                            raise
+                        response.force_close()
                     return response
         finally:
             supervisor.proxy_tasks.discard(task)

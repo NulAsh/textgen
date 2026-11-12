@@ -556,8 +556,8 @@ class LlamaServer:
             cmd = _patch_cmd_for_ik(cmd)
 
         env = os.environ.copy()
-        from modules.vault_runtime import ACTIVE
-        if ACTIVE:
+        from modules import vault_runtime
+        if vault_runtime.ACTIVE:
             import secrets
             # Authenticate the private model service without exposing its key
             # on the process command line or persisting it in settings.
@@ -570,6 +570,11 @@ class LlamaServer:
                 env['LD_LIBRARY_PATH'] = f"{current_path}:{os.path.dirname(self.server_path)}"
             else:
                 env['LD_LIBRARY_PATH'] = os.path.dirname(self.server_path)
+            if vault_runtime.ACTIVE:
+                from modules.vault_native import prepare_library_aliases
+                aliases = prepare_library_aliases(self.server_path, vault_runtime.WORKSPACE)
+                if aliases is not None:
+                    env['LD_LIBRARY_PATH'] = str(aliases) + os.pathsep + env['LD_LIBRARY_PATH']
 
         if shared.args.verbose:
             logger.info("llama-server command-line flags:")

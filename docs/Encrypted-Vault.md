@@ -144,6 +144,21 @@ python -m pip install 'numpy==2.3.*' 'pydantic==2.14.3'
 
 Continue using the existing vault database and password.
 
+The November 12 model-loader fix addresses `libllama-common.so.0: cannot open
+shared object file` and exit code 127 on a fresh llama.cpp wheel installation.
+The wheel normally creates library symlinks in `site-packages` on first import;
+the confined worker cannot write there. The launcher now creates those aliases
+in its volatile RAM workspace and adds them to the model subprocess's library
+search path. The installed wheel and write restrictions remain intact. Update
+with `git pull --ff-only`, then restart the gateway and unlock the existing
+vault. No package reinstall or manual system-library symlinks are needed for
+this specific failure.
+
+Clearing the model dropdown now displays **No model selected** without a
+traceback. Closing or refreshing a page during streaming no longer records
+`Cannot write to closing transport` as a gateway failure. Genuine backend
+failures continue to appear in Diagnostics; older diagnostic entries remain.
+
 **Encrypted backup** downloads a consistent, single-file SQLite backup. It
 contains encrypted content only. Use this button instead of copying a live
 database while its WAL is active. To restore, stop TextGen and launch with the

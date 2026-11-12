@@ -36,7 +36,14 @@ try:
     captured = {}
     vault_runtime.launch = lambda blocks, paths: captured.update(blocks=blocks, paths=paths)
     import server
-    from modules import chat, models_settings, ui, ui_image_generation, ui_notebook
+    from modules import (
+        chat,
+        models_settings,
+        ui,
+        ui_image_generation,
+        ui_model_menu,
+        ui_notebook,
+    )
     from modules.vault_store import Vault, read_tree
 
     secret = 'SYNTHETIC-PRIVATE-CONTENT-TEST-927018'
@@ -50,6 +57,18 @@ try:
         upload = client.post('/upload', files={'files': ('synthetic.txt', secret.encode(), 'text/plain')})
         upload_path = Path(upload.json()[0])
         assert upload_path.is_relative_to(data) and upload_path.read_text() == secret
+        # Clearing/refreshing the model dropdown must not resolve a None path
+        # or discard the user's current settings, even after a failed load.
+        for empty_model in (None, '', 'None'):
+            state = dict(server.shared.settings)
+            before = state.copy()
+            output = ui_model_menu.handle_load_model_event_initial(empty_model, state)
+            assert state == before
+            assert len(output) == len(ui.list_interface_input_elements()) + 3
+            assert output[-3] is state
+            assert all(item == {'__type__': 'update'} for item in output[:-3] + output[-2:])
+            for autoload in (False, True):
+                assert list(ui_model_menu.load_model_wrapper(empty_model, 'llama.cpp', autoload)) == ['No model selected']
         history = {'internal': [[secret, secret + '-GENERATED']], 'visible': [[secret, secret + '-GENERATED']]}
         chat.add_message_attachment(history, 0, str(upload_path))
         chat.save_history(history, 'synthetic-chat', 'Assistant', 'instruct')

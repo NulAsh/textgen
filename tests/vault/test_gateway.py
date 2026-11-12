@@ -162,6 +162,56 @@ async def test_streaming_proxy_and_upload_stay_authenticated(app, monkeypatch, u
 
 
 @pytest.mark.asyncio
+async def test_browser_disconnect_closes_stream_without_gateway_error(app, monkeypatch, unused_tcp_port_factory, capsys):
+    supervisor, client = app
+    await unlock(client)
+    resume = asyncio.Event()
+    async def stream(request):
+        response = web.StreamResponse(headers={'Content-Type': 'text/event-stream'})
+        await response.prepare(request)
+        await response.write(b'data: first\n\n')
+        await resume.wait()
+        try:
+            for _ in range(32):
+                await response.write(b'data: ' + b'x' * 65536 + b'\n\n')
+                await asyncio.sleep(0)
+        except ConnectionResetError:
+            pass  # The proxy must close its upstream when the browser leaves.
+        return response
+    async def health(request):
+        return web.json_response({'ok': True})
+    backend = web.Application()
+    backend.router.add_get('/queue/data', stream)
+    backend.router.add_get('/health', health)
+    runner = web.AppRunner(backend)
+    await runner.setup()
+    backend_port = unused_tcp_port_factory()
+    await web.TCPSite(runner, '127.0.0.1', backend_port).start()
+    class TestConnector(aiohttp.TCPConnector):
+        async def _resolve_host(self, host, port, traces=None):
+            return await super()._resolve_host('127.0.0.1', backend_port, traces=traces)
+    monkeypatch.setattr(gateway.aiohttp, 'UnixConnector', lambda **kwargs: TestConnector())
+    supervisor.ready = True
+    try:
+        response = await client.get('/ui/queue/data')
+        assert await response.content.readline() == b'data: first\n'
+        response.close()
+        resume.set()
+        async def wait_for_proxy_cleanup():
+            while supervisor.proxy_tasks:
+                await asyncio.sleep(0.01)
+        await asyncio.wait_for(wait_for_proxy_cleanup(), timeout=3)
+        diagnostics = await (await client.get('/vault/diagnostics')).text()
+        assert 'gateway.log' not in diagnostics
+        assert 'Vault web request failed' not in capsys.readouterr().err
+        response = await client.get('/ui/health')
+        assert response.status == 200 and await response.json() == {'ok': True}
+    finally:
+        resume.set()
+        await runner.cleanup()
+
+
+@pytest.mark.asyncio
 async def test_wrong_password_cannot_steal_unlocked_session(app):
     supervisor, client = app
     await unlock(client)

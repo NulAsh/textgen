@@ -232,6 +232,10 @@ def create_event_handlers():
 
 
 def load_model_wrapper(selected_model, loader, autoload=False):
+    if selected_model in (None, '', 'None'):
+        yield "No model selected"
+        return
+
     try:
         settings = get_model_metadata(selected_model)
     except FileNotFoundError:
@@ -243,22 +247,18 @@ def load_model_wrapper(selected_model, loader, autoload=False):
         yield "### {}\n\n- Settings updated: Click \"Load\" to load the model\n- Max sequence length: {}".format(selected_model, settings['truncation_length_info'])
         return
 
-    if selected_model == 'None':
-        yield "No model selected"
-    else:
-        try:
-            yield f"Loading `{selected_model}`..."
-            unload_model()
-            if selected_model != '':
-                shared.model, shared.tokenizer = load_model(selected_model, loader)
+    try:
+        yield f"Loading `{selected_model}`..."
+        unload_model()
+        shared.model, shared.tokenizer = load_model(selected_model, loader)
 
-            if shared.model is not None:
-                yield f"Successfully loaded `{selected_model}`."
-            else:
-                yield f"Failed to load `{selected_model}`."
-        except Exception:
-            logger.exception('Failed to load the model.')
-            yield traceback.format_exc().replace('\n', '\n\n')
+        if shared.model is not None:
+            yield f"Successfully loaded `{selected_model}`."
+        else:
+            yield f"Failed to load `{selected_model}`."
+    except Exception:
+        logger.exception('Failed to load the model.')
+        yield traceback.format_exc().replace('\n', '\n\n')
 
 
 def load_lora_wrapper(selected_loras):
@@ -472,6 +472,11 @@ def get_initial_gpu_layers_max():
 
 
 def handle_load_model_event_initial(model, state):
+    if model in (None, '', 'None'):
+        # Dropdown clearing/refresh can emit None. Keep the current settings
+        # and let load_model_wrapper display the empty-selection status.
+        return [gr.skip() for _ in ui.list_interface_input_elements()] + [state, gr.skip(), gr.skip()]
+
     state = apply_model_settings_to_state(model, state)
     output = ui.apply_interface_values(state)
     update_model_parameters(state)  # This updates the command-line flags

@@ -3,6 +3,36 @@
 Validated against upstream `c93f8871239550de2ccfe1e95d469aa82616f07e`.
 All fixtures contain synthetic data. No user chats or passwords were used.
 
+## Native model loader regression, 2026-11-12
+
+A pristine llama_cpp_binaries 0.138.0 wheel contains versioned shared libraries
+and a `_symlinks.json` manifest. Its import hook attempts to create the missing
+SONAME aliases in the installed package. Landlock denies these writes, leaving
+`llama-server` unable to find `libllama-common.so.0` (exit code 127). The earlier
+interface-only native test did not load a model and missed this path.
+
+The loader now resolves the manifest into symlinks in the worker's volatile RAM
+directory and supplies that directory to the model subprocess's dynamic loader.
+The executable and library files stay in the read-only installation. Regression
+tests check chained aliases, repeated loads, invalid path/cycle rejection, and
+an unchanged installation. The native probe imports a freshly extracted wheel
+only after applying production Landlock, then loads the public tiny
+`ggml-org/tiny-llamas` stories260K model and generates streamed tokens through
+TextGen's `LlamaServer`. It also verifies HTTP 401 for an unauthenticated
+generation request. CI downloads hash-pinned wheel/model fixtures for both
+Python versions. No production confinement bypass was added.
+
+Additional regressions clear the model dropdown through each empty value and
+disconnect a real streaming HTTP client, checking that subsequent requests work
+without a spurious gateway traceback. Existing tests retain coverage for genuine
+proxy errors in encrypted diagnostics.
+
+Local Python 3.12.14 and 3.14.10 tests each passed **49 tests with 3
+Landlock-dependent skips**.
+The CPU wheel and Vulkan wheel both loaded the tiny model and generated tokens
+on the CPU. This does not exercise GPU offload. The native CI results will be
+recorded after the published workflow completes.
+
 ## Queue regression, 2026-11-11
 
 The initial validation did not submit a real Gradio queue job. A later report
@@ -99,8 +129,9 @@ and confinement without monkeypatching them.
 
 ## Still requiring deployment validation
 
-- Real model inference, GPU/VRAM behavior, backend JIT caches and native
-  subprocesses, including the llama.cpp authentication integration.
+- Production-sized model inference, GPU/VRAM behavior and backend JIT caches.
+  The November 12 regression covers tiny-model CPU inference and llama.cpp
+  authentication; other native backends still require deployment validation.
 - Diffusion model execution and large image workloads.
 - Browser interaction across the full Gradio interface, including model
   switching and long-running streamed generations.
