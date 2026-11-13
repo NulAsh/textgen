@@ -30,6 +30,9 @@ Local validation: **106 passed, 6 skipped** (the skips require Landlock or a
 root Colab supervisor). Ruff passed, and all notebook cells compile with no
 saved execution outputs. Native CPU inference passed with the metadata/UI
 checks above. The CI matrix also runs the privileged isolation checks.
+The new helper also downloaded the pinned tiny model through a real Hugging
+Face `/blob/` URL; its SHA-256 matched the CI fixture. Notebook undefined-name
+lint covers imports shared between cells as well as ordinary Python lint.
 
 ## Colab Host regression, 2026-11-13
 

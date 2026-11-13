@@ -49,7 +49,9 @@ jobs:
           TEXTGEN_TEST_LLAMA_MODEL: ${{ runner.temp }}/stories260K.gguf
         run: python -m pytest -q -rs tests/vault
       - name: Lint vault code
-        run: ruff check modules/vault_*.py modules/metadata_gguf.py modules/gguf_download.py tests/vault --output-format concise
+        run: |
+          ruff check modules/vault_*.py modules/metadata_gguf.py modules/gguf_download.py tests/vault --output-format concise
+          python -c 'import json; n = json.load(open("Colab-Encrypted-TextGen.ipynb")); print("\n\n".join("".join(c["source"]) for c in n["cells"] if c["cell_type"] == "code"))' | ruff check --select F821 -
       - name: Test dedicated Colab worker identity and native inference
         env:
           TEXTGEN_TEST_LLAMA_WHEEL: ${{ runner.temp }}/llama-cpu.whl
