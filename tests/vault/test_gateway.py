@@ -1,4 +1,5 @@
 import asyncio
+import secrets
 from types import SimpleNamespace
 
 import aiohttp
@@ -123,6 +124,70 @@ async def test_colab_gateway_keeps_exact_origin_and_partitioned_session(app):
     assert response.status == 200
     assert 'Partitioned' in response.headers['Set-Cookie'] and 'Max-Age=0' in response.headers['Set-Cookie']
     assert (await client.get('/vault/status')).status == 401
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('transport_host', ['localhost', '127.0.0.1', '172.28.0.2:7860',
+                                          'session-7860-colab.googleusercontent.com:443'])
+async def test_colab_bootstrap_pins_one_proxy_host_without_unlocking(app, transport_host):
+    supervisor, client = app
+    origin = 'https://session-7860-colab.googleusercontent.com'
+    supervisor.colab_origin = origin
+    token = supervisor.colab_bootstrap = secrets.token_urlsafe(32)
+    client.session.headers.update({'Host': transport_host, 'Origin': origin})
+    assert (await client.get('/')).status == 403
+    assert (await client.get('/?vault-bootstrap=incorrect', allow_redirects=False)).status == 403
+    assert supervisor.colab_proxy_host is None and supervisor.colab_bootstrap == token
+    # The capability authorizes only the initial GET, never an unlock/control
+    # request, and forwarded headers do not grant transport host trust.
+    assert (await client.post('/vault/unlock?vault-bootstrap=' + token, json={
+        'password': PASSWORD, 'confirmation': PASSWORD})).status == 403
+    assert (await client.get('/', headers={'X-Forwarded-Host': origin.removeprefix('https://')})).status == 403
+    response = await client.get('/?vault-bootstrap=' + token, allow_redirects=False)
+    assert response.status == 303 and response.headers['Location'] == '/'
+    assert response.headers['Cache-Control'].startswith('no-store')
+    assert token not in await response.text()
+    assert supervisor.colab_proxy_host == transport_host and supervisor.colab_bootstrap is None
+    assert supervisor.vault is None and supervisor.session is None
+    assert (await client.get('/')).status == 200
+    assert (await client.get('/vault/status')).status == 401
+    # Re-rendering the same iframe may repeat its initial URL; this is safe
+    # for the pinned host, but cannot authorize a second host.
+    assert (await client.get('/?vault-bootstrap=' + token, allow_redirects=False)).status == 303
+    assert (await client.get('/?vault-bootstrap=' + token, headers={'Host': 'attacker.example'},
+                             allow_redirects=False)).status == 403
+    body = {'password': PASSWORD, 'confirmation': PASSWORD}
+    assert (await client.post('/vault/unlock', json=body, headers={'Origin': 'https://attacker.example'})).status == 403
+    assert (await client.post('/vault/unlock', json=body, headers={'X-Vault-CSRF': 'incorrect'})).status == 403
+    await unlock(client)
+    client.session.headers['Cookie'] = f'{gateway.COOKIE}={supervisor.session}'
+    assert (await client.get('/vault/status')).status == 200
+    assert (await client.get('/vault/status', headers={'Host': 'attacker.example'})).status == 403
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_does_not_enable_aliases_locally_or_after_unlock(app):
+    supervisor, client = app
+    token = supervisor.colab_bootstrap = secrets.token_urlsafe(32)
+    response = await client.get('/?vault-bootstrap=' + token, headers={'Host': 'other.example'}, allow_redirects=False)
+    assert response.status == 403 and supervisor.colab_proxy_host is None
+    # An unused token expires on successful unlock even if the initial page
+    # was opened through a host that was already trusted.
+    supervisor.colab_origin = 'https://session-7860-colab.googleusercontent.com'
+    client.session.headers['Origin'] = supervisor.colab_origin
+    await unlock(client)
+    assert supervisor.colab_bootstrap is None
+    assert (await client.get('/?vault-bootstrap=' + token, headers={'Host': 'other.example'},
+                             allow_redirects=False)).status == 403
+
+
+def test_bootstrap_environment_is_not_inherited_by_worker(tmp_path, monkeypatch):
+    monkeypatch.setenv('TEXTGEN_COLAB_BOOTSTRAP_TOKEN', 'synthetic-bootstrap-token')
+    options = SimpleNamespace(vault=str(tmp_path / 'vault.sqlite3'), vault_ram_dir='/dev/shm',
+                              vault_colab_origin='https://session-7860-colab.googleusercontent.com')
+    supervisor = gateway.Supervisor(options, [])
+    assert supervisor.colab_bootstrap == 'synthetic-bootstrap-token'
+    assert 'TEXTGEN_COLAB_BOOTSTRAP_TOKEN' not in gateway.os.environ
 
 
 @pytest.mark.asyncio

@@ -65,6 +65,11 @@ class Supervisor:
         self.lock_fd = None
         self.isolation = None
         self.colab_origin = getattr(options, 'vault_colab_origin', None)
+        # The notebook opens the exact configured HTTPS URL with a random,
+        # one-use bootstrap token. This pins the proxy's actual transport Host
+        # without trusting arbitrary forwarded headers or a domain wildcard.
+        self.colab_bootstrap = os.environ.pop('TEXTGEN_COLAB_BOOTSTRAP_TOKEN', None) if self.colab_origin else None
+        self.colab_proxy_host = None
         self.backup_dir = getattr(options, 'vault_backup_dir', None)
         self.last_backup = None
         self.backup_pending = False
@@ -173,6 +178,7 @@ class Supervisor:
                     await self.save_backup(force=True)
                     await self.start_worker()
                 self.failures = 0
+                self.colab_bootstrap = None
                 self.session = secrets.token_urlsafe(32)
                 return self.session
             except Exception:
@@ -295,18 +301,36 @@ class Supervisor:
 def create_app(supervisor):
     @web.middleware
     async def security(request, handler):
-        expected = {f"127.0.0.1:{supervisor.options.listen_port}", f"localhost:{supervisor.options.listen_port}"}
-        if supervisor.colab_origin:
-            expected.add(urlsplit(supervisor.colab_origin).netloc)
-        if request.host not in expected:
-            raise web.HTTPForbidden(text="Invalid Host.")
-        if request.method not in ("GET", "HEAD", "OPTIONS"):
-            origin = supervisor.colab_origin or f"http://{request.host}"
-            if request.headers.get("Origin") != origin:
-                raise web.HTTPForbidden(text="Invalid Origin.")
-            if request.path.startswith("/vault/") and not secrets.compare_digest(request.headers.get("X-Vault-CSRF", ""), supervisor.csrf):
-                raise web.HTTPForbidden(text="Invalid request token.")
         try:
+            expected = {f"127.0.0.1:{supervisor.options.listen_port}", f"localhost:{supervisor.options.listen_port}"}
+            if supervisor.colab_origin:
+                expected.add(urlsplit(supervisor.colab_origin).netloc)
+            if supervisor.colab_proxy_host:
+                expected.add(supervisor.colab_proxy_host)
+            # Only the initial locked landing page can establish a transport
+            # alias. The capability is sent to the configured Colab HTTPS URL;
+            # it is unrelated to the password and never unlocks a vault.
+            bootstrap = request.query.get('vault-bootstrap', '')
+            landing = request.method == 'GET' and request.path == '/' and bool(bootstrap)
+            if (landing and supervisor.colab_origin and supervisor.colab_bootstrap
+                    and supervisor.vault is None
+                    and secrets.compare_digest(bootstrap.encode(), supervisor.colab_bootstrap.encode())):
+                if len(request.headers.getall('Host', [])) != 1:
+                    raise web.HTTPForbidden(text='Invalid Host.')
+                supervisor.colab_proxy_host = request.host
+                supervisor.colab_bootstrap = None
+                expected.add(request.host)
+            if request.host not in expected:
+                raise web.HTTPForbidden(text="Invalid Host.")
+            if landing and supervisor.colab_origin:
+                # Remove the one-use token before serving the unlock form.
+                raise web.HTTPSeeOther(location='/')
+            if request.method not in ("GET", "HEAD", "OPTIONS"):
+                origin = supervisor.colab_origin or f"http://{request.host}"
+                if request.headers.get("Origin") != origin:
+                    raise web.HTTPForbidden(text="Invalid Origin.")
+                if request.path.startswith("/vault/") and not secrets.compare_digest(request.headers.get("X-Vault-CSRF", ""), supervisor.csrf):
+                    raise web.HTTPForbidden(text="Invalid request token.")
             response = await handler(request)
         except web.HTTPException as error:
             response = web.Response(status=error.status, text=error.text, headers=error.headers)

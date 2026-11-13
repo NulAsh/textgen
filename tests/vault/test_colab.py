@@ -101,5 +101,9 @@ def test_colab_notebook_uses_fork_private_gateway_and_no_cached_output():
     assert '--vault-isolation' in source and '--vault-colab-origin' in source
     assert '--vault-backup-dir' in source
     assert 'modules.vault_colab' in source
+    # The iframe must open the exact configured origin. The Colab helper
+    # obtains another proxy URL internally; an absolute path pins our URL.
+    assert 'path=bootstrap_url' in source
+    assert 'TEXTGEN_COLAB_BOOTSTRAP_TOKEN' in source and 'vault-bootstrap' in source
     # Password entry belongs to the gateway, never an executed/saved cell.
     assert 'getpass' not in source and 'input(' not in source

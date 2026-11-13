@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import secrets
 import shutil
 import subprocess
 import sys
@@ -106,6 +107,12 @@ async def test_native_gateway_and_worker(tmp_path, unused_tcp_port, isolation):
     password = 'native synthetic test password'
     secret = 'SYNTHETIC-NATIVE-ENCRYPTED-UPLOAD-927018'
     try:
+        if supervisor.colab_origin:
+            supervisor.colab_bootstrap = secrets.token_urlsafe(32)
+            client.session.headers['Host'] = 'private-colab-proxy.internal:8080'
+            assert (await client.get('/')).status == 403
+            response = await client.get('/?vault-bootstrap=' + supervisor.colab_bootstrap, allow_redirects=False)
+            assert response.status == 303
         response = await client.post('/vault/unlock', json={'password': password, 'confirmation': password})
         assert response.status == 200, await response.text()
         if supervisor.colab_origin:

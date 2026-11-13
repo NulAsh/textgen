@@ -3,6 +3,27 @@
 Validated against upstream `c93f8871239550de2ccfe1e95d469aa82616f07e`.
 All fixtures contain synthetic data. No user chats or passwords were used.
 
+## Colab Host regression, 2026-11-13
+
+The first reported live Colab launch reached the gateway but received
+`Invalid Host` before vault unlock. The original allowlist assumed the proxy
+would preserve the external hostname or a loopback hostname with the listening
+port. The notebook also requested a proxy URL separately from the iframe helper.
+The exact rejected transport header was not captured in that report.
+
+The launch cell now uses one configured HTTPS URL. A random, one-use capability
+on its initial GET pins the proxy's actual transport Host; a redirect removes
+the token before serving the unlock form. This never unlocks a vault and cannot
+enroll a second host. An unused capability expires on successful unlock, is
+removed from the supervisor environment, and is never inherited by the worker.
+Exact Origin checks, session cookies and CSRF protection remain required.
+
+Regressions cover rewritten loopback/internal hosts, explicit port 443, wrong
+tokens, attempted enrollment through POST, replay against another host, spoofed
+forwarded headers and expiry on unlock. The native Colab worker test exercises
+this enrollment before its existing real queue, upload and encrypted restore
+checks. Live Colab browser/proxy confirmation is still needed.
+
 ## Colab adaptation, 2026-11-12
 
 The new optional Colab launcher uses bubblewrap with a dedicated unprivileged
