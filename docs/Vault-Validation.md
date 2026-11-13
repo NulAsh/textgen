@@ -24,6 +24,13 @@ forwarded headers and expiry on unlock. The native Colab worker test exercises
 this enrollment before its existing real queue, upload and encrypted restore
 checks. Live Colab browser/proxy confirmation is still needed.
 
+Local validation passed 71 tests with 6 environment-dependent skips. [CI run
+43419460185](https://github.com/NulAsh/textgen/actions/runs/43419460185)
+passed **all 77 distinct tests on Python 3.11, 3.13 and 3.14**, validating
+implementation commit `048bb52fe359ca7de2d048bbccd12092ad4e6efb`. Each version
+passed 74 ordinary tests and the 3 separate privileged-supervisor tests.
+Ruff also passed on all three versions.
+
 ## Colab adaptation, 2026-11-12
 
 The new optional Colab launcher uses bubblewrap with a dedicated unprivileged
