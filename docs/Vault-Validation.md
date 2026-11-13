@@ -34,6 +34,11 @@ The new helper also downloaded the pinned tiny model through a real Hugging
 Face `/blob/` URL; its SHA-256 matched the CI fixture. Notebook undefined-name
 lint covers imports shared between cells as well as ordinary Python lint.
 
+[CI run 43445818311](https://github.com/NulAsh/textgen/actions/runs/43445818311)
+passed **all 112 distinct tests on Python 3.11, 3.13 and 3.14** against
+`63e4b7ff0fefbba9c5114f10200710306cda613d`: 109 ordinary tests followed by the
+3 privileged Colab tests in each matrix job. Python and notebook lint passed.
+
 ## Colab Host regression, 2026-11-13
 
 The first reported live Colab launch reached the gateway but received
