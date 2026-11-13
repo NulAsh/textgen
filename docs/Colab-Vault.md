@@ -138,6 +138,44 @@ decisions.
 - **Model load failed:** open **Diagnostics** in the unlocked toolbar. Backend
   logs remain inside the encrypted vault; NVIDIA/GPU errors need investigation
   on the assigned runtime.
+- **`MemoryError` in `metadata_gguf.py`, before llama.cpp starts:** the old reader
+  trusted lengths in the file without validating its signature. An HTML file
+  page saved with a `.gguf` extension reproduces this error. It does not by
+  itself establish a GPU memory shortage. The updated reader checks the GGUF
+  signature, version and metadata lengths and reports a useful file error.
+  HTML pages, Git LFS pointers and malformed/truncated metadata are rejected.
+  Supported files use little-endian GGUF v2/v3; metadata is limited to 128 MiB
+  and 2,000,000 entries/array elements in total, with 65535-byte maximum keys.
+  These limits apply to metadata, not model weight size.
+
+  Cell 2 now converts Hugging Face `/blob/` file-page URLs into `/resolve/`
+  download URLs. It checks new and existing files; a bad existing file is kept
+  until a replacement download passes header/metadata validation. Interrupted
+  downloads are not installed, and HTTP Content-Length is checked when supplied.
+  Metadata checks do not verify tensor contents or the publisher's checksum.
+
+  To repair an existing session, **Save and lock**, then run cell 5. In a new
+  cell, use the same public model URL that you originally downloaded:
+
+  ```python
+  import json
+  import subprocess
+
+  model_url = ""  # Paste your public GGUF URL here, or leave blank to check existing files.
+  subprocess.run(["git", "-C", str(TEXTGEN_ROOT), "pull", "--ff-only"], check=True)
+  subprocess.run([str(TEXTGEN_PYTHON), "-B", "-m", "modules.gguf_download",
+                  "--model-dir", str(TEXTGEN_MODELS), "--url", model_url],
+                 cwd=TEXTGEN_ROOT, check=True)
+  notebook = json.loads((TEXTGEN_ROOT / "Colab-Encrypted-TextGen.ipynb").read_text())
+  launch = next("".join(cell["source"]) for cell in notebook["cells"]
+                if "".join(cell["source"]).startswith("#@title 4."))
+  exec(launch)
+  ```
+
+  This keeps the current vault, Drive mount and valid model downloads. Pulling
+  code alone does not replace cells in an already-open notebook; the snippet
+  calls the new downloader and launch cell explicitly. If validation still
+  fails, share the error and the public model URL (remove any access tokens).
 - **Drive backup failed:** keep the runtime alive, correct Drive access/quota,
   re-enter the password if requested, and retry **Save and lock**. Do not discard
   the active runtime while it contains unsaved RAM data.

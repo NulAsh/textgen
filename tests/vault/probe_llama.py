@@ -41,10 +41,29 @@ elif colab_parent:
     from modules.vault_colab import verify_sandbox
     verify_sandbox(ram, colab_parent)
 
+import gradio as gr
 import requests
 
 from modules import shared
 from modules.llama_cpp_server import LlamaServer
+from modules.models_settings import get_model_metadata
+from modules.ui_model_menu import handle_load_model_event_initial, load_model_wrapper
+
+bad_model = data / 'invalid.gguf'
+bad_model.write_bytes(b'<!DOCTYPE html><html><head><title>File page</title></head></html>')
+status = list(load_model_wrapper(str(bad_model), 'llama.cpp', autoload=True))
+assert len(status) == 1 and 'HTML page' in status[0], status
+try:
+    handle_load_model_event_initial(str(bad_model), {})
+except gr.Error as error:
+    assert 'HTML page' in str(error), error
+else:
+    raise AssertionError('Malformed model selection did not report a UI error')
+
+# Exercise the same metadata path as the Model dropdown before native loading.
+metadata = get_model_metadata(str(model))
+assert metadata['loader'] == 'llama.cpp'
+assert metadata['truncation_length_info'] > 0
 
 server_path = None if confined or colab_parent else str(binary_dir / 'llama-server')
 with LlamaServer(str(model), server_path=server_path) as backend:

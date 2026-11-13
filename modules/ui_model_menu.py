@@ -10,6 +10,7 @@ import gradio as gr
 
 from modules import loaders, shared, ui, utils
 from modules.logging_colors import logger
+from modules.metadata_gguf import GGUFError
 from modules.LoRA import add_lora_to_model
 from modules.models import load_model, unload_model
 from modules.models_settings import (
@@ -238,6 +239,9 @@ def load_model_wrapper(selected_model, loader, autoload=False):
 
     try:
         settings = get_model_metadata(selected_model)
+    except GGUFError as error:
+        yield f'Model file error: {error}'
+        return
     except FileNotFoundError:
         exc = traceback.format_exc()
         yield exc.replace('\n', '\n\n')
@@ -477,7 +481,10 @@ def handle_load_model_event_initial(model, state):
         # and let load_model_wrapper display the empty-selection status.
         return [gr.skip() for _ in ui.list_interface_input_elements()] + [state, gr.skip(), gr.skip()]
 
-    state = apply_model_settings_to_state(model, state)
+    try:
+        state = apply_model_settings_to_state(model, state)
+    except GGUFError as error:
+        raise gr.Error(str(error)) from None
     output = ui.apply_interface_values(state)
     update_model_parameters(state)  # This updates the command-line flags
 

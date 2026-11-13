@@ -3,6 +3,34 @@
 Validated against upstream `c93f8871239550de2ccfe1e95d469aa82616f07e`.
 All fixtures contain synthetic data. No user chats or passwords were used.
 
+## Colab GGUF metadata regression, 2026-11-13
+
+The user confirmed that Colab now starts and creates a vault. Their next
+failure is a `MemoryError` while reading a GGUF metadata key, before native
+model loading starts. The log does not identify the model or prove which
+bytes were downloaded. An HTML file page saved as `.gguf` reproduces the
+same exception in the old parser under a bounded address-space limit.
+
+The reader now validates the signature, supported version, key lengths,
+remaining bytes and total metadata allocation limits. Errors are surfaced
+through the Model dropdown and load status. The Colab download helper converts
+Hugging Face file-page URLs, validates existing and downloaded metadata,
+checks HTTP Content-Length when supplied, and installs downloads atomically.
+Bad replacements and interrupted transfers leave the original file intact.
+
+Regression cases cover valid v2/v3 metadata, tokenizer strings/byte tokens,
+HTML/LFS downloads, unsupported versions/endianness, huge counts and lengths,
+truncation, allocation bounds on sparse files, download link conversion,
+replacement and partial-file cleanup. The existing native inference probe
+also exercises the actual UI error handlers and `get_model_metadata` before
+loading the pinned tiny public model, including under Colab isolation in CI.
+The user's exact file and live Colab GPU remain unverified.
+
+Local validation: **106 passed, 6 skipped** (the skips require Landlock or a
+root Colab supervisor). Ruff passed, and all notebook cells compile with no
+saved execution outputs. Native CPU inference passed with the metadata/UI
+checks above. The CI matrix also runs the privileged isolation checks.
+
 ## Colab Host regression, 2026-11-13
 
 The first reported live Colab launch reached the gateway but received

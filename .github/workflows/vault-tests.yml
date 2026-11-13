@@ -49,7 +49,7 @@ jobs:
           TEXTGEN_TEST_LLAMA_MODEL: ${{ runner.temp }}/stories260K.gguf
         run: python -m pytest -q -rs tests/vault
       - name: Lint vault code
-        run: ruff check modules/vault_*.py tests/vault --output-format concise
+        run: ruff check modules/vault_*.py modules/metadata_gguf.py modules/gguf_download.py tests/vault --output-format concise
       - name: Test dedicated Colab worker identity and native inference
         env:
           TEXTGEN_TEST_LLAMA_WHEEL: ${{ runner.temp }}/llama-cpu.whl
