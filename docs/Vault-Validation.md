@@ -39,6 +39,12 @@ reporting. It is not a substitute for real NVIDIA hardware validation. CI
 additionally runs the full simulated-driver preflight under a dedicated UID,
 alongside native CPU inference and encrypted gateway tests.
 
+[CI run 43544369365](https://github.com/NulAsh/textgen/actions/runs/43544369365)
+passed **all 120 distinct tests on Python 3.11, 3.13 and 3.14** against
+`c2b63bc6a457c561a634b1276d3bdaaa5c10eebc`: 116 ordinary tests and 4 privileged
+Colab checks per job. Both Python and notebook lint passed. Actual NVIDIA
+initialization and model offloading remain checks for the user's GPU runtime.
+
 ## Colab GGUF metadata regression, 2026-11-13
 
 The user confirmed that Colab now starts and creates a vault. Their next
