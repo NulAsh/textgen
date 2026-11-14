@@ -70,7 +70,9 @@ process metadata: NVIDIA's driver may rename its threads through
 `/proc/PID/task/TID/comm` during CUDA initialization. Making all of procfs
 read-only can cause `CUDA_ERROR_OPERATING_SYSTEM (304)` and CPU fallback.
 Global controls (`/proc/sys`, `sysrq-trigger`, `irq`, `bus`, `fs`, `driver`,
-`acpi` and `scsi`, when present) are bound read-only. Procfs process metadata
+`acpi` and `scsi`, when present) and all inherited submounts under `/proc` are
+bound read-only. This includes container masks such as `/proc/keys` backed by
+`/dev/null`; their layout can vary between runtimes. Procfs process metadata
 lives in kernel memory; this exception does not permit persistent file writes.
 
 The separate host identity and privilege restrictions prevent traversal through
@@ -132,6 +134,28 @@ decisions.
 
 ## Troubleshooting
 
+- **Cell 1 fails with “unexpected writable mount”:** an older CUDA fix inherited
+  container-specific `/proc` submounts without making them read-only. Update the
+  fork and repeat the check. If cell 1 failed before any vault was unlocked,
+  run this in a new cell in the same runtime:
+
+  ```python
+  import subprocess
+
+  root = "/content/textgen-encrypted"
+  subprocess.run(["git", "-C", root, "pull", "--ff-only"], check=True)
+  result = subprocess.run(
+      ["/content/textgen-encrypted-env/bin/python", "-B", "-m", "modules.vault_colab"],
+      cwd=root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+  print(result.stdout)
+  if result.returncode:
+      raise RuntimeError("Isolation check failed; share the output above.")
+  print("Write isolation verified. Continue with cell 2.")
+  ```
+
+  The updated check reports the exact path, filesystem type and mount flags if
+  another unexpected mount remains. Notebook cells 1 and 4 also include the
+  subprocess diagnostic in their exceptions, instead of only an exit code.
 - **CUDA fails with “OS call failed or operation not supported on this OS”:**
   update the fork and cell 4. The older procfs mount blocked CUDA's thread-name
   writes, even though the CUDA wheel was installed and GPU layers were `auto`.

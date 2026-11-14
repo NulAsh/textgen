@@ -34,6 +34,27 @@ def has_nvidia_gpu():
                for path in Path('/dev').glob('nvidia[0-9]*'))
 
 
+def mount_path(encoded):
+    return Path(encoded.replace('\\040', ' ').replace('\\011', '\t').replace('\\012', '\n').replace('\\134', '\\'))
+
+
+def readonly_proc_paths():
+    """Preserve container masks and protect every inherited procfs submount.
+
+    A recursive writable bind of /proc also inherits mounts such as /proc/keys
+    backed by /dev/null. These differ across container runtimes. Only the procfs
+    root needs to stay writable for CUDA's process/thread metadata.
+    """
+    paths = set(PROC_READONLY)
+    for line in Path('/proc/self/mountinfo').read_text().splitlines():
+        path = mount_path(line.split()[4])
+        if Path('/proc') in path.parents:
+            paths.add(path)
+    # Ignore obscured/nonexistent paths from hidden mounts. The worker verifies
+    # the final reachable mount table independently, before reading vault data.
+    return sorted((path for path in paths if path.exists()), key=lambda path: (len(path.parts), str(path)))
+
+
 def create_syscall_filter():
     """Block namespace/mount changes without writing container sysctls.
 
@@ -91,13 +112,13 @@ def verify_mounts(workspace):
         raise VaultError('Colab worker root filesystem is writable.')
     for path in PROC_READONLY:
         if path.exists() and not os.statvfs(path).f_flag & os.ST_RDONLY:
-            raise VaultError('Colab global procfs controls are writable.')
+            raise VaultError(f'Colab global procfs controls are writable: {str(path)!r}.')
     # Verify every visible writable mount, including mounts below a read-only
     # parent. Exceptions are private RAM/devices, selected GPU nodes and the
     # procfs process metadata described below; persistent files stay read-only.
     for line in Path('/proc/self/mountinfo').read_text().splitlines():
         fields = line.split()
-        mount = Path(fields[4].replace('\\040', ' ').replace('\\011', '\t').replace('\\012', '\n').replace('\\134', '\\'))
+        mount = mount_path(fields[4])
         if 'rw' not in fields[5].split(','):
             continue
         # mountinfo also lists hidden mounts below overmounts. Resolve the
@@ -128,7 +149,8 @@ def verify_mounts(workspace):
                    or mount.name.startswith('nvidia'))) or mount.parent == Path('/dev/nvidia-caps'))
         if device and stat.S_ISCHR(mount.stat().st_mode):
             continue
-        raise VaultError('Colab sandbox contains an unexpected writable mount.')
+        raise VaultError('Colab sandbox contains an unexpected writable mount: '
+                         f'path={str(mount)!r}, type={kind!r}, root={fields[3]!r}, flags={fields[5]!r}.')
 
 
 def verify_sandbox(workspace, supervisor_pid):
@@ -234,10 +256,10 @@ class ColabIsolation:
                 '--bind', workspace, workspace, '--bind', '/proc', '/proc']
         # CUDA's cuInit may rename threads through /proc/PID/task/TID/comm.
         # Reuse procfs (Colab forbids a fresh proc mount) without making global
-        # kernel controls writable. All disk mounts remain read-only.
-        for path in PROC_READONLY:
-            if path.exists():
-                args += ['--ro-bind', str(path), str(path)]
+        # controls or inherited container masks writable. Protect parent mounts
+        # before children, since each bind also brings along its submounts.
+        for path in readonly_proc_paths():
+            args += ['--ro-bind', str(path), str(path)]
         # No block devices, host shared memory, terminals or broad /dev bind.
         for path in sorted(Path('/dev').glob('nvidia*')):
             if stat.S_ISCHR(path.stat().st_mode):

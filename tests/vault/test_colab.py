@@ -72,10 +72,54 @@ def test_real_mount_verifier_distinguishes_hidden_and_writable_mounts(tmp_path, 
         if expose != 'none':
             assert result.returncode != 0
             assert ('unexpected writable mount' if expose == 'disk' else 'global procfs controls') in result.stderr
+            assert (str(tmp_path) if expose == 'disk' else '/proc/sys') in result.stderr
+            if expose == 'disk':
+                assert 'type=' in result.stderr and 'flags=' in result.stderr
         else:
             assert result.returncode == 0, result.stderr
     finally:
         os.close(filter_fd)
+        shutil.rmtree(ram)
+
+
+@pytest.mark.parametrize('mask', ['null', 'file', 'nested-directory'])
+def test_inherited_proc_masks_stay_readonly_without_blocking_thread_names(tmp_path, mask):
+    """Build container-style procfs submounts before constructing the worker."""
+    binary = shutil.which('bwrap')
+    if not binary:
+        pytest.skip('Install bubblewrap to test inherited container mounts.')
+    if mask == 'nested-directory' and not Path('/proc/tty').is_dir():
+        pytest.skip('This fixture uses the kernel tty directory as a mountpoint.')
+    ram = Path(tempfile.mkdtemp(prefix='textgen-proc-masks-', dir='/dev/shm'))
+    outside = tmp_path / 'outside'
+    outside.write_text('unchanged')
+    outside.chmod(0o666)
+    directory = tmp_path / 'mask-directory'
+    directory.mkdir()
+    (directory / 'nested file').touch()
+    try:
+        # This outer namespace simulates the container before TextGen starts.
+        # It intentionally has no production seccomp filter yet, so the real
+        # inner worker can build its own namespace and apply that filter.
+        command = [binary, '--unshare-user', '--ro-bind', '/', '/', '--bind', '/proc', '/proc',
+                   '--bind', str(ram), str(ram)]
+        if mask == 'null':
+            command += ['--dev-bind', '/dev/null', '/proc/keys']
+            paths = ['/proc/keys']
+        elif mask == 'file':
+            command += ['--bind', str(outside), '/proc/keys']
+            paths = ['/proc/keys']
+        else:
+            command += ['--bind', str(directory), '/proc/tty',
+                        '--bind', str(outside), '/proc/tty/nested file']
+            paths = ['/proc/tty', '/proc/tty/nested file']
+        command += ['--', sys.executable, '-B', 'tests/vault/probe_proc_masks.py', str(ram), *paths]
+        result = subprocess.run(command, capture_output=True, text=True, timeout=30, check=False)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert result.stdout.strip() == 'proc masks protected; thread names writable'
+        assert outside.read_text() == 'unchanged'
+        assert not (directory / 'forbidden').exists()
+    finally:
         shutil.rmtree(ram)
 
 

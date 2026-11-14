@@ -3,6 +3,34 @@
 Validated against upstream `c93f8871239550de2ccfe1e95d469aa82616f07e`.
 All fixtures contain synthetic data. No user chats or passwords were used.
 
+## Colab inherited procfs mount regression, 2026-11-14
+
+After starting a fresh Colab runtime, the user reported cell 1 failing with
+`Colab sandbox contains an unexpected writable mount.` The old diagnostic did
+not identify that mount. A real nested bubblewrap namespace reproduces the
+same exception when the container masks `/proc/keys` with `/dev/null`: the
+previous CUDA change's writable bind of `/proc` inherits that writable mount.
+The exact mount in the user's runtime has not been observed.
+
+The launcher now discovers all inherited mountpoints under `/proc` and binds
+them read-only alongside global procfs controls, in parent-before-child order.
+Only the procfs root retains its process-metadata writes for CUDA thread names.
+The mount verifier's allowlist is unchanged. Rejected mounts now report their
+path, filesystem type, root and flags; notebook preflight exceptions preserve
+the subprocess diagnostic.
+
+Three real nested-namespace regressions cover a `/dev/null` mask, a regular-file
+mask and nested directory/file masks, including a mountpoint containing a
+space. They verify denial of writes to each mask, unchanged outside content,
+writable thread names and writable private RAM. Existing tests still reject
+deliberately exposed writable disk mounts and global procfs controls.
+
+Local validation: **116 passed, 7 environment-dependent skips**. The skips
+require Landlock or a root Colab supervisor. Python lint, notebook undefined-name
+lint and compilation of all five code cells passed, with no saved outputs.
+Actual Colab mount layout and NVIDIA hardware remain checks for the user's
+runtime.
+
 ## Colab CUDA initialization regression, 2026-11-14
 
 The user confirmed model parsing now works, then reported CUDA initialization
