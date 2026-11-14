@@ -35,6 +35,13 @@ lint and compilation of all five code cells passed, with no saved outputs.
 Actual Colab mount layout and NVIDIA hardware remain checks for the user's
 runtime.
 
+[CI run 43640807925](https://github.com/NulAsh/textgen/actions/runs/43640807925)
+passed **all 123 distinct tests on Python 3.11, 3.13 and 3.14** against
+`241eb4b10b227a7fadee3e41c33d3979782f49ff`: 116 ordinary tests followed by
+7 privileged Colab checks per job. The three inherited-mount cases passed
+with the production worker identity and confinement checks. Python and
+notebook lint passed on all three versions.
+
 ## Colab CUDA initialization regression, 2026-11-14
 
 The user confirmed model parsing now works, then reported CUDA initialization
