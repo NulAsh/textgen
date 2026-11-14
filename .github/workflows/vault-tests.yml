@@ -64,4 +64,4 @@ jobs:
           git archive HEAD | tar -x -C "$COLAB_TEST_SOURCE"
           chmod 755 "$COLAB_TEST_SOURCE"
           cd "$COLAB_TEST_SOURCE"
-          sudo --preserve-env=TEXTGEN_TEST_LLAMA_WHEEL,TEXTGEN_TEST_LLAMA_MODEL "$(command -v python)" -m pytest -q -rs tests/vault/test_colab.py::test_native_colab_filesystem_isolation 'tests/vault/test_linux.py::test_native_gateway_and_worker[colab]' 'tests/vault/test_native_libraries.py::test_fresh_llama_wheel_loads_and_generates[colab]'
+          sudo --preserve-env=TEXTGEN_TEST_LLAMA_WHEEL,TEXTGEN_TEST_LLAMA_MODEL "$(command -v python)" -m pytest -q -rs tests/vault/test_colab.py::test_native_colab_filesystem_isolation 'tests/vault/test_linux.py::test_native_gateway_and_worker[colab]' 'tests/vault/test_native_libraries.py::test_fresh_llama_wheel_loads_and_generates[colab]' tests/vault/test_cuda.py::test_cuda_preflight_with_simulated_driver_and_real_worker_identity

@@ -3,6 +3,42 @@
 Validated against upstream `c93f8871239550de2ccfe1e95d469aa82616f07e`.
 All fixtures contain synthetic data. No user chats or passwords were used.
 
+## Colab CUDA initialization regression, 2026-11-14
+
+The user confirmed model parsing now works, then reported CUDA initialization
+failing with an OS-operation error and CPU fallback despite automatic GPU
+layers. The installed CUDA backend reaches `cudaGetDeviceCount`. The old
+read-only procfs mount independently reproduces the blocked
+`/proc/self/task/TID/comm` write documented in
+[NVIDIA/OpenShell #1486](https://github.com/NVIDIA/OpenShell/issues/1486).
+It is a concrete sandbox incompatibility consistent with the reported error;
+the actual Colab GPU has not been exercised in this development environment.
+
+The Colab sandbox now permits process-local procfs metadata writes, keeping
+global procfs controls and every persistent filesystem read-only. Dedicated
+host identity, capability removal, no-new-privileges, namespace/mount syscall
+denials and parent procfs access checks remain required. Production preflight
+tests thread-name writes in the main thread, another thread and a child,
+while checking denial of outside writes via direct paths, self-root/fd links,
+parent roots and parent process names. Mount verification rejects writable
+global procfs controls as well as writable disk mounts.
+
+The new CUDA probe performs driver/context initialization and a 4 KiB
+allocation, fill and copy back, with deterministic verification. The notebook
+checks it inside the real sandbox before unlocking. A separate host probe
+runs first, including to initialize any lazily created UVM devices before the
+private device view is built. The gateway repeats the GPU check when NVIDIA
+devices are present. Probe contexts and temporary files are released.
+
+Local validation: **113 passed, 7 environment-dependent skips**; Python lint,
+notebook undefined-name lint and notebook compilation passed. Regression
+tests use a clearly labelled simulated C CUDA driver performing the actual
+procfs syscall: the old mount returns error 304 and the updated mount passes.
+This also exercises ctypes bindings and initialization/allocation/copy failure
+reporting. It is not a substitute for real NVIDIA hardware validation. CI
+additionally runs the full simulated-driver preflight under a dedicated UID,
+alongside native CPU inference and encrypted gateway tests.
+
 ## Colab GGUF metadata regression, 2026-11-13
 
 The user confirmed that Colab now starts and creates a vault. Their next

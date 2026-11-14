@@ -1,7 +1,8 @@
 """Colab write isolation using bubblewrap and a separate host UID.
 
-No new proc filesystem is mounted: Colab blocks that operation. The existing
-proc mount is read-only, and a dedicated unprivileged host identity prevents
+No new proc filesystem is mounted: Colab blocks that operation. Process-local
+procfs controls stay writable for CUDA thread names; global controls are
+read-only. A dedicated unprivileged host identity prevents
 access through the notebook/supervisor's /proc/PID/root or file descriptors.
 Every launch verifies the resulting mount layout before importing TextGen.
 """
@@ -23,6 +24,14 @@ from pathlib import Path
 
 from modules.vault_linux import disable_core_dumps, verify_tmpfs
 from modules.vault_store import VaultError
+
+PROC_READONLY = tuple(Path('/proc') / name for name in
+                      ('sys', 'sysrq-trigger', 'irq', 'bus', 'fs', 'driver', 'acpi', 'scsi'))
+
+
+def has_nvidia_gpu():
+    return any(path.name[6:].isdigit() and stat.S_ISCHR(path.stat().st_mode)
+               for path in Path('/dev').glob('nvidia[0-9]*'))
 
 
 def create_syscall_filter():
@@ -80,8 +89,12 @@ def verify_mounts(workspace):
     workspace = Path(workspace).resolve()
     if not os.statvfs('/').f_flag & os.ST_RDONLY:
         raise VaultError('Colab worker root filesystem is writable.')
+    for path in PROC_READONLY:
+        if path.exists() and not os.statvfs(path).f_flag & os.ST_RDONLY:
+            raise VaultError('Colab global procfs controls are writable.')
     # Verify every visible writable mount, including mounts below a read-only
-    # parent. Only private RAM, private devices, and selected GPU nodes qualify.
+    # parent. Exceptions are private RAM/devices, selected GPU nodes and the
+    # procfs process metadata described below; persistent files stay read-only.
     for line in Path('/proc/self/mountinfo').read_text().splitlines():
         fields = line.split()
         mount = Path(fields[4].replace('\\040', ' ').replace('\\011', '\t').replace('\\012', '\n').replace('\\134', '\\'))
@@ -102,6 +115,11 @@ def verify_mounts(workspace):
         finally:
             os.close(fd)
         kind = fields[fields.index('-') + 1]
+        if kind == 'proc' and mount == Path('/proc') and fields[3] == '/':
+            # Kernel process metadata, not a persistent filesystem. The
+            # private host UID and verify_sandbox's parent checks are essential:
+            # proc magic links must not expose an unsandboxed writable root.
+            continue
         if kind == 'tmpfs' and (mount == workspace or workspace in mount.parents or mount == Path('/dev') or Path('/dev') in mount.parents):
             continue
         if kind == 'devpts' and mount == Path('/dev/pts'):
@@ -213,7 +231,13 @@ class ColabIsolation:
         os.lseek(self.filter_fd, 0, os.SEEK_SET)
         args = [self.binary, '--unshare-user', '--seccomp', str(self.filter_fd), '--cap-drop', 'ALL',
                 '--die-with-parent', '--ro-bind', '/', '/', '--dev', '/dev',
-                '--bind', workspace, workspace]
+                '--bind', workspace, workspace, '--bind', '/proc', '/proc']
+        # CUDA's cuInit may rename threads through /proc/PID/task/TID/comm.
+        # Reuse procfs (Colab forbids a fresh proc mount) without making global
+        # kernel controls writable. All disk mounts remain read-only.
+        for path in PROC_READONLY:
+            if path.exists():
+                args += ['--ro-bind', str(path), str(path)]
         # No block devices, host shared memory, terminals or broad /dev bind.
         for path in sorted(Path('/dev').glob('nvidia*')):
             if stat.S_ISCHR(path.stat().st_mode):
@@ -227,44 +251,105 @@ class ColabIsolation:
     def subprocess_options(self):
         return {'user': self.uid, 'group': self.uid, 'extra_groups': [], 'pass_fds': (self.filter_fd,)}
 
-    def preflight(self, ram_dir='/dev/shm'):
+    def preflight(self, ram_dir='/dev/shm', check_cuda=False):
         """Test real isolation, including child inheritance, before decrypting."""
         verify_tmpfs(ram_dir)
         ram = Path(tempfile.mkdtemp(prefix='textgen-colab-check-', dir=ram_dir))
         outside = None
+        cuda_info = None
         try:
             fd, name = tempfile.mkstemp(prefix='textgen-colab-outside-')
             outside = Path(name)
             with os.fdopen(fd, 'w') as stream:
                 stream.write('unchanged')
             outside.chmod(0o666)  # Must be denied by isolation, not ordinary DAC.
+            env = os.environ.copy()
+            if check_cuda:
+                cache = ram / 'volatile/cuda-check'
+                cache.mkdir(parents=True)
+                env['CUDA_CACHE_PATH'] = str(cache)
+                env['TMPDIR'] = str(cache)
+                # Initialize before enumerating device nodes: nvidia-uvm may
+                # be created lazily. Never initialize CUDA in the supervisor
+                # that will later hold the vault key.
+                host = subprocess.run([sys.executable, '-B', '-m', 'modules.vault_cuda'],
+                                      capture_output=True, text=True, timeout=30, check=False, env=env)
+                if host.returncode:
+                    raise VaultError('CUDA failed in the notebook runtime before sandboxing. '
+                                     'Check that a GPU is assigned and its driver works. ' + host.stderr[-2000:])
             self.claim(ram)
             command = [sys.executable, '-B', '-m', 'modules.vault_colab', '--probe', str(ram), str(os.getpid()), str(outside)]
+            if check_cuda:
+                command.append('--check-cuda')
             result = subprocess.run(self.command(ram, command), capture_output=True, text=True, timeout=30,
-                                    check=False, **self.subprocess_options())
-            if result.returncode or result.stdout.strip() != 'isolated' or outside.read_text() != 'unchanged':
+                                    check=False, env=env, **self.subprocess_options())
+            if result.returncode or outside.read_text() != 'unchanged':
                 raise VaultError('Colab filesystem isolation failed its startup test. No vault was unlocked. '
-                                 'The runtime must support unprivileged user namespaces and bubblewrap. '
+                                 'The runtime must support the sandbox and, when requested, CUDA inside it. '
                                  + result.stderr[-2000:])
+            report = json.loads(result.stdout)
+            if report.get('isolation') != 'verified' or (check_cuda and not report.get('cuda')):
+                raise VaultError('Colab startup probe returned an incomplete report.')
+            cuda_info = report.get('cuda')
         except (OSError, subprocess.TimeoutExpired) as error:
             raise VaultError('Unable to start the Colab filesystem sandbox. No vault was unlocked.') from error
         finally:
             shutil.rmtree(ram)
             if outside is not None:
                 outside.unlink(missing_ok=True)
+        return cuda_info
 
 
-def probe(workspace, parent, outside):
-    verify_sandbox(workspace, parent)
-    (Path(workspace) / 'volatile/allowed').write_text('RAM only')
-    for path in (outside, f'/proc/{parent}/root{outside}', f'/proc/{os.getppid()}/root{outside}'):
+def probe_thread_names():
+    """Exercise the exact procfs operation used by NVIDIA, also on CPU-only CI."""
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import get_native_id
+
+    def rename():
+        path = Path(f'/proc/self/task/{get_native_id()}/comm')
+        original = path.read_text().rstrip('\n')
         try:
-            Path(path).write_text('forbidden')
+            path.write_text('textgen-cuda')
+            if path.read_text().strip() != 'textgen-cuda':
+                raise VaultError('Cannot rename CUDA worker threads through procfs.')
+        finally:
+            path.write_text(original)
+
+    rename()
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        executor.submit(rename).result()
+
+
+def probe(workspace, parent, outside, check_cuda=False):
+    verify_sandbox(workspace, parent)
+    probe_thread_names()
+    (Path(workspace) / 'volatile/allowed').write_text('RAM only')
+    # Check both direct paths and procfs magic links. An fd opened through
+    # the read-only mount must not be reopened for writing through procfs.
+    outside_fd = os.open(outside, os.O_RDONLY | os.O_CLOEXEC)
+    try:
+        paths = (outside, f'/proc/self/root{outside}', f'/proc/self/fd/{outside_fd}',
+                 f'/proc/{parent}/root{outside}', f'/proc/{os.getppid()}/root{outside}')
+        for path in paths:
+            try:
+                Path(path).write_text('forbidden')
+            except OSError:
+                pass
+            else:
+                raise AssertionError('Unconfined write succeeded')
+    finally:
+        os.close(outside_fd)
+    # Process names are mutable kernel memory; unrelated host process metadata
+    # must remain protected by the dedicated UID as well.
+    for pid in {parent, os.getppid()}:
+        try:
+            Path(f'/proc/{pid}/comm').write_text('forbidden')
         except OSError:
             pass
         else:
-            raise AssertionError('Unconfined write succeeded')
+            raise AssertionError('Unconfined process metadata write succeeded')
     code = ('import ctypes, errno\nfrom pathlib import Path\n'
+            'from modules.vault_colab import probe_thread_names\nprobe_thread_names()\n'
             'libc = ctypes.CDLL(None, use_errno=True)\n'
             'assert libc.unshare(0x10000000) == -1 and ctypes.get_errno() == errno.EPERM\n'
             'try:\n    Path(' + repr(str(outside)) + ').write_text("forbidden")\n'
@@ -273,24 +358,29 @@ def probe(workspace, parent, outside):
     child = subprocess.run([sys.executable, '-B', '-c', code], capture_output=True, text=True, check=False)
     if child.returncode or child.stdout.strip() != 'isolated':
         raise AssertionError('Child did not inherit isolation')
-    print('isolated')
+    cuda_info = None
+    if check_cuda:
+        from modules.vault_cuda import probe_cuda
+        cuda_info = probe_cuda()
+    print(json.dumps({'isolation': 'verified', 'cuda': cuda_info}))
 
 
 def main():
     parser = argparse.ArgumentParser(description='Verify Colab vault isolation without opening a vault')
     parser.add_argument('--probe', nargs=3, metavar=('RAM', 'PARENT', 'OUTSIDE'))
+    parser.add_argument('--check-cuda', action='store_true', help='Require CUDA initialization and a small VRAM allocation inside the sandbox.')
     args = parser.parse_args()
     disable_core_dumps()
     if args.probe:
         ram, parent, outside = args.probe
-        probe(ram, int(parent), outside)
+        probe(ram, int(parent), outside, check_cuda=args.check_cuda)
     else:
         isolation = ColabIsolation()
         try:
-            isolation.preflight()
+            cuda_info = isolation.preflight(check_cuda=args.check_cuda)
         finally:
             isolation.close()
-        print(json.dumps({'isolation': 'bubblewrap', 'verified': True}))
+        print(json.dumps({'isolation': 'bubblewrap', 'verified': True, 'cuda': cuda_info}))
 
 
 if __name__ == '__main__':

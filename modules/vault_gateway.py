@@ -76,10 +76,10 @@ class Supervisor:
 
     def acquire(self):
         if getattr(self.options, 'vault_isolation', 'landlock') == 'colab':
-            from modules.vault_colab import ColabIsolation
+            from modules.vault_colab import ColabIsolation, has_nvidia_gpu
             self.isolation = ColabIsolation()
             try:
-                self.isolation.preflight(self.options.vault_ram_dir)
+                self.isolation.preflight(self.options.vault_ram_dir, check_cuda=has_nvidia_gpu())
             except BaseException:
                 self.isolation.close()
                 raise

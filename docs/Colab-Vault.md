@@ -65,12 +65,30 @@ Python executes; it does not need to write Colab's read-only `/proc/sys`.
 Children inherit the mount restrictions. No disk-backed temporary directory
 is substituted.
 
-Colab denies creating new proc mounts. This launcher reuses the read-only proc
-view, while the separate host identity prevents traversal through the notebook
-or supervisor's `/proc/PID/root` and descriptors. Startup verifies the actual
-reachable mount flags and capabilities, tests denial against a world-writable host file
-and parent proc paths, and checks child-process inheritance. The worker repeats
-the mount/privilege checks before importing TextGen or model libraries.
+Colab denies creating new proc mounts. This launcher reuses procfs with writable
+process metadata: NVIDIA's driver may rename its threads through
+`/proc/PID/task/TID/comm` during CUDA initialization. Making all of procfs
+read-only can cause `CUDA_ERROR_OPERATING_SYSTEM (304)` and CPU fallback.
+Global controls (`/proc/sys`, `sysrq-trigger`, `irq`, `bus`, `fs`, `driver`,
+`acpi` and `scsi`, when present) are bound read-only. Procfs process metadata
+lives in kernel memory; this exception does not permit persistent file writes.
+
+The separate host identity and privilege restrictions prevent traversal through
+the notebook or supervisor's `/proc/PID/root` and descriptors. Startup verifies
+the actual reachable mount flags and capabilities, tests denial against a
+world-writable host file through direct paths and procfs root/fd links, rejects
+writes to parent process names, and checks child-process inheritance. The worker
+repeats mount/privilege checks before importing TextGen or model libraries.
+
+Cell 4 requires a CUDA preflight before displaying the unlock form. It tests
+driver initialization, context creation and a 4 KiB device-memory round trip
+both outside and inside the sandbox, and prints the GPU name and VRAM capacity.
+The outside check runs in a separate process before NVIDIA device enumeration,
+so lazily created `nvidia-uvm` nodes are included. Its temporary/cache directory
+is in RAM. The gateway repeats this test when NVIDIA GPU nodes are present;
+the supervisor never initializes CUDA in the process holding vault keys.
+These checks catch CUDA initialization failures; they do not guarantee that a
+particular model fits in VRAM or that every CUDA operation is supported.
 
 The supervisor owns the RAM workspace's outer directory (0710, traversal only
 for the private worker group); data and volatile subdirectories are private to
@@ -114,6 +132,29 @@ decisions.
 
 ## Troubleshooting
 
+- **CUDA fails with “OS call failed or operation not supported on this OS”:**
+  update the fork and cell 4. The older procfs mount blocked CUDA's thread-name
+  writes, even though the CUDA wheel was installed and GPU layers were `auto`.
+  Use **Save and lock**, then cell 5, and run this in a new cell in the same
+  runtime (no model download or new vault is needed):
+
+  ```python
+  import json
+  import subprocess
+
+  subprocess.run(["git", "-C", str(TEXTGEN_ROOT), "pull", "--ff-only"], check=True)
+  notebook = json.loads((TEXTGEN_ROOT / "Colab-Encrypted-TextGen.ipynb").read_text())
+  launch = next("".join(cell["source"]) for cell in notebook["cells"]
+                if "".join(cell["source"]).startswith("#@title 4."))
+  exec(launch)
+  ```
+
+  The preflight should report the GPU and `"vram_check": "passed"`. Unlock and
+  reload the model with `gpu_layers = -1` (automatic). If the check fails,
+  provide its error. If it passes but model loading still fails, provide the
+  CUDA/offloaded-layers lines from **Diagnostics**. A model larger than available
+  VRAM can still need CPU offloading; a GPU runtime does not make all RAM use
+  disappear.
 - **Invalid Host in an older notebook:** use the updated cell 4 as well as the
   updated repository; pulling the repository does not replace cells in an
   already-open notebook. If no vault was unlocked, run cell 5 to stop the old
@@ -184,4 +225,5 @@ decisions.
   vault or port.
 
 Implementation references: [bubblewrap](https://github.com/containers/bubblewrap),
-[Colab iframe API](https://github.com/googlecolab/colabtools/blob/main/google/colab/output/_util.py).
+[Colab iframe API](https://github.com/googlecolab/colabtools/blob/main/google/colab/output/_util.py),
+[NVIDIA's documented procfs/CUDA initialization failure](https://github.com/NVIDIA/OpenShell/issues/1486).

@@ -50,8 +50,8 @@ def test_colab_worker_refuses_unconfined_entry():
         shutil.rmtree(ram)
 
 
-@pytest.mark.parametrize('expose_disk', [False, True])
-def test_real_mount_verifier_distinguishes_hidden_and_writable_mounts(tmp_path, expose_disk):
+@pytest.mark.parametrize('expose', ['none', 'disk', 'proc-sys'])
+def test_real_mount_verifier_distinguishes_hidden_and_writable_mounts(tmp_path, expose):
     binary = shutil.which('bwrap')
     if not binary:
         pytest.skip('Install bubblewrap to test actual mount layouts.')
@@ -64,13 +64,14 @@ def test_real_mount_verifier_distinguishes_hidden_and_writable_mounts(tmp_path, 
                 'assert libc.unshare(0x10000000) == -1 and ctypes.get_errno() == errno.EPERM; '
                 f'from modules.vault_colab import verify_mounts; verify_mounts({str(ram)!r})')
         command = ColabIsolation.command(SimpleNamespace(binary=binary, filter_fd=filter_fd), ram, [sys.executable, '-B', '-c', code])
-        if expose_disk:
+        if expose != 'none':
             index = command.index('--')
-            command[index:index] = ['--bind', str(tmp_path), str(tmp_path)]
+            command[index:index] = (['--bind', str(tmp_path), str(tmp_path)] if expose == 'disk'
+                                    else ['--tmpfs', '/proc/sys'])
         result = subprocess.run(command, capture_output=True, text=True, check=False, timeout=30, pass_fds=(filter_fd,))
-        if expose_disk:
+        if expose != 'none':
             assert result.returncode != 0
-            assert 'unexpected writable mount' in result.stderr
+            assert ('unexpected writable mount' if expose == 'disk' else 'global procfs controls') in result.stderr
         else:
             assert result.returncode == 0, result.stderr
     finally:
