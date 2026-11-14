@@ -24,6 +24,10 @@ mask and nested directory/file masks, including a mountpoint containing a
 space. They verify denial of writes to each mask, unchanged outside content,
 writable thread names and writable private RAM. Existing tests still reject
 deliberately exposed writable disk mounts and global procfs controls.
+On Ubuntu CI the synthetic container is built in a root-owned private mount
+namespace, then the real worker runs under its dedicated unprivileged host UID.
+This respects the supplied AppArmor profile, which intentionally prevents a
+bubblewrap child from creating another sandbox; no policy is relaxed.
 
 Local validation: **116 passed, 7 environment-dependent skips**. The skips
 require Landlock or a root Colab supervisor. Python lint, notebook undefined-name

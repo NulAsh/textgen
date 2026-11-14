@@ -15,13 +15,17 @@ probe = '''
 import os
 import sys
 from pathlib import Path
-from modules.vault_colab import verify_mounts, probe_thread_names
+from modules.vault_colab import verify_mounts, verify_sandbox, probe_thread_names
 
 ram = Path(sys.argv[1])
-verify_mounts(ram)
+parent = int(sys.argv[2])
+if parent:
+    verify_sandbox(ram, parent)
+else:
+    verify_mounts(ram)
 probe_thread_names()
 assert not os.statvfs('/proc').f_flag & os.ST_RDONLY
-for name in sys.argv[2:]:
+for name in sys.argv[3:]:
     path = Path(name)
     assert os.statvfs(path).f_flag & os.ST_RDONLY, name
     target = path / 'forbidden' if path.is_dir() else path
@@ -31,18 +35,42 @@ for name in sys.argv[2:]:
         pass
     else:
         raise AssertionError('Inherited proc mount allowed a write: ' + name)
-(ram / 'allowed').write_text('synthetic RAM content')
+(ram / 'volatile' / 'allowed').write_text('synthetic RAM content')
 print('proc masks protected; thread names writable')
 '''
 
-ram = Path(sys.argv[1])
-fd = create_syscall_filter()
+fixture = sys.argv[1] == '--fixture'
+if fixture:
+    # The caller must have entered a private mount namespace. Never install
+    # fixture mounts into the test runner's namespace or change its policy.
+    assert os.geteuid() == 0
+    assert os.readlink('/proc/self/ns/mnt') != os.readlink(f'/proc/{os.getppid()}/ns/mnt')
+    mask, ram_name, outside, directory = sys.argv[2:]
+    if mask == 'nested-directory':
+        mounts = [(directory, '/proc/tty'), (outside, '/proc/tty/nested file')]
+    else:
+        mounts = [('/dev/null' if mask == 'null' else outside, '/proc/keys')]
+    for source, target in mounts:
+        subprocess.run(['mount', '--bind', source, target], check=True)
+    paths = [target for _, target in mounts]
+else:
+    ram_name, *paths = sys.argv[1:]
+
+ram = Path(ram_name)
+(ram / 'volatile').mkdir(exist_ok=True)
+isolation = ColabIsolation() if fixture else SimpleNamespace(binary=shutil.which('bwrap'), filter_fd=create_syscall_filter())
 try:
-    command = ColabIsolation.command(SimpleNamespace(binary=shutil.which('bwrap'), filter_fd=fd), ram,
-                                     [sys.executable, '-B', '-c', probe, *sys.argv[1:]])
-    result = subprocess.run(command, capture_output=True, text=True, timeout=20, check=False, pass_fds=(fd,))
+    if fixture:
+        isolation.claim(ram)
+    parent = os.getpid() if fixture else 0
+    command = ColabIsolation.command(isolation, ram, [sys.executable, '-B', '-c', probe, str(ram), str(parent), *paths])
+    options = isolation.subprocess_options() if fixture else {'pass_fds': (isolation.filter_fd,)}
+    result = subprocess.run(command, capture_output=True, text=True, timeout=20, check=False, **options)
     sys.stdout.write(result.stdout)
     sys.stderr.write(result.stderr)
     raise SystemExit(result.returncode)
 finally:
-    os.close(fd)
+    if fixture:
+        isolation.close()
+    else:
+        os.close(isolation.filter_fd)

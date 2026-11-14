@@ -88,6 +88,9 @@ def test_inherited_proc_masks_stay_readonly_without_blocking_thread_names(tmp_pa
     binary = shutil.which('bwrap')
     if not binary:
         pytest.skip('Install bubblewrap to test inherited container mounts.')
+    apparmor = Path('/proc/sys/kernel/apparmor_restrict_unprivileged_userns')
+    if os.geteuid() != 0 and apparmor.exists() and apparmor.read_text().strip() == '1':
+        pytest.skip('The container-mount fixture needs root with AppArmor userns restrictions; CI runs it under sudo.')
     if mask == 'nested-directory' and not Path('/proc/tty').is_dir():
         pytest.skip('This fixture uses the kernel tty directory as a mountpoint.')
     ram = Path(tempfile.mkdtemp(prefix='textgen-proc-masks-', dir='/dev/shm'))
@@ -98,22 +101,29 @@ def test_inherited_proc_masks_stay_readonly_without_blocking_thread_names(tmp_pa
     directory.mkdir()
     (directory / 'nested file').touch()
     try:
-        # This outer namespace simulates the container before TextGen starts.
-        # It intentionally has no production seccomp filter yet, so the real
-        # inner worker can build its own namespace and apply that filter.
-        command = [binary, '--unshare-user', '--ro-bind', '/', '/', '--bind', '/proc', '/proc',
-                   '--bind', str(ram), str(ram)]
-        if mask == 'null':
-            command += ['--dev-bind', '/dev/null', '/proc/keys']
-            paths = ['/proc/keys']
-        elif mask == 'file':
-            command += ['--bind', str(outside), '/proc/keys']
-            paths = ['/proc/keys']
+        if os.geteuid() == 0:
+            # Construct the simulated container in a private mount namespace.
+            # Ubuntu's bwrap profile intentionally denies capabilities to its
+            # children, so nesting bwrap cannot construct this outer fixture.
+            # The helper still drops to the real dedicated UID for the worker.
+            command = ['unshare', '--mount', '--propagation', 'private', '--', sys.executable, '-B',
+                       'tests/vault/probe_proc_masks.py', '--fixture', mask, str(ram), str(outside), str(directory)]
         else:
-            command += ['--bind', str(directory), '/proc/tty',
-                        '--bind', str(outside), '/proc/tty/nested file']
-            paths = ['/proc/tty', '/proc/tty/nested file']
-        command += ['--', sys.executable, '-B', 'tests/vault/probe_proc_masks.py', str(ram), *paths]
+            # Local non-root hosts without that AppArmor restriction can build
+            # the same container fixture with an outer bubblewrap namespace.
+            command = [binary, '--unshare-user', '--ro-bind', '/', '/', '--bind', '/proc', '/proc',
+                       '--bind', str(ram), str(ram)]
+            if mask == 'null':
+                command += ['--dev-bind', '/dev/null', '/proc/keys']
+                paths = ['/proc/keys']
+            elif mask == 'file':
+                command += ['--bind', str(outside), '/proc/keys']
+                paths = ['/proc/keys']
+            else:
+                command += ['--bind', str(directory), '/proc/tty',
+                            '--bind', str(outside), '/proc/tty/nested file']
+                paths = ['/proc/tty', '/proc/tty/nested file']
+            command += ['--', sys.executable, '-B', 'tests/vault/probe_proc_masks.py', str(ram), *paths]
         result = subprocess.run(command, capture_output=True, text=True, timeout=30, check=False)
         assert result.returncode == 0, result.stdout + result.stderr
         assert result.stdout.strip() == 'proc masks protected; thread names writable'
